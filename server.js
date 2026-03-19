@@ -56,6 +56,10 @@ app.use('/api/messages', messageRoutes);
 // --- PORTA ABERTA ---
 const portaRoutes = require('./routes/porta-aberta');
 app.use('/api/porta-aberta', portaRoutes);
+
+// --- COMUNIDADES ---
+const communityRoutes = require('./routes/communities');
+app.use('/api/communities', communityRoutes);
 // POST /api/messages            → enviar mensagem
 // GET  /api/messages/:missionId → ver conversa
 

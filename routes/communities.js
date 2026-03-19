@@ -274,4 +274,110 @@ router.post('/', auth, async (req, res) => {
   }
 });
 
+// ============================================
+// SUGESTÃO INTELIGENTE DE COMUNIDADE
+// GET /api/communities/smart-suggest/:missionId
+// Analisa desempenho e sugere comunidade a partir do dia 15
+// ============================================
+router.get('/smart-suggest/:missionId', auth, async (req, res) => {
+  const userId = req.user.userId;
+
+  try {
+    // Buscar a missão
+    const missionRes = await db.query(
+      `SELECT * FROM missions WHERE id = $1 AND (user_id = $2 OR partner_id = $2)`,
+      [req.params.missionId, userId]
+    );
+    const mission = missionRes.rows[0];
+    if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
+
+    // Calcular dia atual
+    const started   = new Date(mission.started_at);
+    const today     = new Date();
+    const dayNumber = Math.floor((today - started) / (1000 * 60 * 60 * 24)) + 1;
+
+    // Só sugerir a partir do dia 15
+    if (dayNumber < 15) {
+      return res.json({
+        suggest: false,
+        reason: 'too_early',
+        day: dayNumber,
+        message: `Ainda no dia ${dayNumber}. Sugestão disponível a partir do dia 15.`
+      });
+    }
+
+    // Contar check-ins feitos até hoje
+    const checkinRes = await db.query(
+      `SELECT COUNT(*) as total FROM checkins
+       WHERE mission_id = $1 AND user_id = $2 AND completed = true`,
+      [mission.id, userId]
+    );
+    const checkinsDone = parseInt(checkinRes.rows[0].total);
+
+    // Calcular consistência (% de dias feitos)
+    const consistency = Math.round((checkinsDone / dayNumber) * 100);
+
+    // Só sugerir se consistência >= 60%
+    if (consistency < 60) {
+      return res.json({
+        suggest: false,
+        reason: 'low_consistency',
+        consistency,
+        day: dayNumber,
+        message: 'Mantém o ritmo para desbloquear a sugestão de comunidade!'
+      });
+    }
+
+    // Buscar comunidade da categoria
+    const commRes = await db.query(
+      `SELECT c.*,
+        CASE WHEN cm.user_id IS NOT NULL THEN true ELSE false END AS already_member
+       FROM communities c
+       LEFT JOIN community_members cm ON cm.community_id = c.id AND cm.user_id = $1
+       WHERE c.category = $2
+       ORDER BY c.member_count DESC LIMIT 1`,
+      [userId, mission.category]
+    );
+
+    const community = commRes.rows[0];
+    if (!community) {
+      return res.json({
+        suggest: false,
+        reason: 'no_community',
+        message: 'Ainda não há comunidade para esta categoria.'
+      });
+    }
+
+    // Já é membro — não sugerir
+    if (community.already_member) {
+      return res.json({
+        suggest: false,
+        reason: 'already_member',
+        message: 'Já és membro desta comunidade!'
+      });
+    }
+
+    res.json({
+      suggest: true,
+      day: dayNumber,
+      consistency,
+      checkins_done: checkinsDone,
+      community: {
+        id: community.id,
+        name: community.name,
+        slug: community.slug,
+        icon: community.icon,
+        description: community.description,
+        member_count: community.member_count,
+        cover_color: community.cover_color
+      },
+      message: `Estás a ir muito bem! ${consistency}% de consistência no dia ${dayNumber}.`
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erro ao gerar sugestão.' });
+  }
+});
+
 module.exports = router;

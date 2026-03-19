@@ -52,6 +52,10 @@ app.use('/api/checkins', checkinRoutes);
 // --- MENSAGENS ---
 const messageRoutes = require('./routes/messages');
 app.use('/api/messages', messageRoutes);
+
+// --- PORTA ABERTA ---
+const portaRoutes = require('./routes/porta-aberta');
+app.use('/api/porta-aberta', portaRoutes);
 // POST /api/messages            → enviar mensagem
 // GET  /api/messages/:missionId → ver conversa
 

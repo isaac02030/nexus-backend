@@ -60,6 +60,10 @@ app.use('/api/porta-aberta', portaRoutes);
 // --- COMUNIDADES ---
 const communityRoutes = require('./routes/communities');
 app.use('/api/communities', communityRoutes);
+
+// --- NOTIFICAÇÕES ---
+const { router: notifRoutes } = require('./routes/notifications');
+app.use('/api/notifications', notifRoutes);
 // POST /api/messages            → enviar mensagem
 // GET  /api/messages/:missionId → ver conversa
 

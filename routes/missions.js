@@ -37,9 +37,8 @@ router.post('/', auth, async (req, res) => {
     if (mode === 'parceiro' || mode === 'rival') {
       const match = await findMatch(mission, userId, db);
       if (match) {
-        // Match encontrado — ligar as duas missões
-        await activateMission(mission.id, match.user_id, db);
-        await activateMission(match.id, userId, db);
+        // Match encontrado — ativar UMA missão e apagar a do parceiro
+        await activateMission(mission.id, match, db);
         return res.status(201).json({
           mission,
           matched: true,
@@ -96,10 +95,15 @@ router.get('/:id', auth, async (req, res) => {
 router.get('/', auth, async (req, res) => {
   try {
     const result = await db.query(
-      `SELECT m.*, u.username AS partner_name
+      `SELECT m.*,
+        CASE WHEN m.user_id = $1
+          THEN u2.username
+          ELSE u1.username
+        END AS partner_name
        FROM missions m
-       LEFT JOIN users u ON m.partner_id = u.id
-       WHERE m.user_id = $1
+       LEFT JOIN users u1 ON m.user_id    = u1.id
+       LEFT JOIN users u2 ON m.partner_id = u2.id
+       WHERE m.user_id = $1 OR m.partner_id = $1
        ORDER BY m.created_at DESC`,
       [req.user.userId]
     );
@@ -110,13 +114,13 @@ router.get('/', auth, async (req, res) => {
 });
 
 // ============================================
-// LÓGICA DE MATCH
-// Procura alguém na fila de espera com
-// objetivo compatível
+// LÓGICA DE MATCH CORRIGIDA
+// Quando A encontra match com B:
+// - A missão de A fica ativa com partner_id = B
+// - A missão de B é APAGADA (evita duplicados)
 // ============================================
 async function findMatch(newMission, currentUserId, db) {
   // Procura missões em espera na mesma categoria e modo
-  // com utilizador diferente
   const result = await db.query(
     `SELECT * FROM missions
      WHERE status   = 'waiting'
@@ -145,11 +149,13 @@ async function findMatch(newMission, currentUserId, db) {
   return result.rows[0];
 }
 
-// Ativa uma missão com o parceiro encontrado
-async function activateMission(missionId, partnerId, db) {
-  const now = new Date();
-  const endsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // +30 dias
+// Ativa UMA missão com o parceiro encontrado
+// e apaga a missão do parceiro (evita duplicados)
+async function activateMission(newMissionId, matchedMission, db) {
+  const now    = new Date();
+  const endsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
+  // Ativar a nova missão com o partner_id do outro utilizador
   await db.query(
     `UPDATE missions
      SET status     = 'active',
@@ -157,7 +163,13 @@ async function activateMission(missionId, partnerId, db) {
          started_at = $2,
          ends_at    = $3
      WHERE id = $4`,
-    [partnerId, now, endsAt, missionId]
+    [matchedMission.user_id, now, endsAt, newMissionId]
+  );
+
+  // Apagar a missão do parceiro para evitar duplicados
+  await db.query(
+    `DELETE FROM missions WHERE id = $1`,
+    [matchedMission.id]
   );
 }
 

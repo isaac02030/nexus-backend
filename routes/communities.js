@@ -178,6 +178,22 @@ router.post('/:slug/posts', auth, async (req, res) => {
       return res.status(403).json({ error: 'Tens de ser membro para publicar.' });
     }
 
+    // Verificar se completou pelo menos uma missão nesta categoria
+    const completedRes = await db.query(
+      `SELECT COUNT(*) as total FROM missions
+       WHERE (user_id = $1 OR partner_id = $1)
+         AND category = $2
+         AND status = 'completed'`,
+      [userId, community.category]
+    );
+    const completed = parseInt(completedRes.rows[0].total);
+    if (completed === 0) {
+      return res.status(403).json({
+        error: 'Tens de completar uma missão nesta categoria para poder publicar.',
+        locked: true
+      });
+    }
+
     const result = await db.query(
       `INSERT INTO community_posts (community_id, user_id, content)
        VALUES ($1, $2, $3) RETURNING *`,

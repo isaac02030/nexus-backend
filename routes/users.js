@@ -106,4 +106,53 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// ============================================
+// ATUALIZAR PERFIL
+// PUT /api/users/profile
+// Body: { username, bio }
+// ============================================
+const auth = require('../middleware/auth');
+
+router.put('/profile', auth, async (req, res) => {
+  const { username, bio } = req.body;
+  const userId = req.user.userId;
+
+  if (!username?.trim()) {
+    return res.status(400).json({ error: 'Username não pode estar vazio.' });
+  }
+
+  try {
+    // Verificar se username já está em uso por outro utilizador
+    const existing = await db.query(
+      'SELECT id FROM users WHERE username = $1 AND id != $2',
+      [username.trim(), userId]
+    );
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'Este username já está em uso.' });
+    }
+
+    const result = await db.query(
+      `UPDATE users SET username = $1, bio = $2, updated_at = NOW()
+       WHERE id = $3
+       RETURNING id, username, email, bio, created_at, updated_at`,
+      [username.trim(), bio?.trim() || null, userId]
+    );
+
+    const user = result.rows[0];
+
+    // Gerar novo token com username atualizado
+    const jwt = require('jsonwebtoken');
+    const token = jwt.sign(
+      { userId: user.id, username: user.username },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({ user, token, message: 'Perfil atualizado!' });
+
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao atualizar perfil.' });
+  }
+});
+
 module.exports = router;

@@ -53,6 +53,11 @@ router.post('/', auth, async (req, res) => {
       [mission_id, userId, dayNumber, note || null]
     );
 
+    // Só incrementar pontuação se for a primeira vez hoje
+    if (!alreadyDone) {
+      await updateScore(mission, userId, db);
+    }
+
     await checkMissionCompletion(mission, db);
 
     res.status(201).json({
@@ -130,21 +135,100 @@ router.get('/:missionId/score', auth, async (req, res) => {
   }
 });
 
+// ============================================
+// CALCULAR SEQUÊNCIA REAL
+// GET /api/checkins/:missionId/streak
+// ============================================
+router.get('/:missionId/streak', auth, async (req, res) => {
+  const userId = req.user.userId;
+  try {
+    const missionRes = await db.query(
+      'SELECT * FROM missions WHERE id = $1 AND (user_id = $2 OR partner_id = $2)',
+      [req.params.missionId, userId]
+    );
+    const mission = missionRes.rows[0];
+    if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
+
+    const started   = new Date(mission.started_at);
+    const today     = new Date();
+    const todayDay  = Math.floor((today - started) / (1000 * 60 * 60 * 24)) + 1;
+
+    // Buscar todos os check-ins do utilizador nesta missão
+    const result = await db.query(
+      `SELECT day_number FROM checkins
+       WHERE mission_id = $1 AND user_id = $2 AND completed = true
+       ORDER BY day_number DESC`,
+      [mission.id, userId]
+    );
+
+    const doneDays = new Set(result.rows.map(r => r.day_number));
+
+    // Calcular sequência a partir de hoje para trás
+    let streak = 0;
+    for (let d = todayDay; d >= 1; d--) {
+      if (doneDays.has(d)) {
+        streak++;
+      } else {
+        break;
+      }
+    }
+
+    // Total de dias completados
+    const total = doneDays.size;
+
+    res.json({ streak, total, today_done: doneDays.has(todayDay) });
+  } catch(err) {
+    res.status(500).json({ error: 'Erro ao calcular sequência.' });
+  }
+});
+
+async function updateScore(mission, userId, db) {
+  const field = mission.user_id === userId ? 'user_score' : 'partner_score';
+  await db.query(`UPDATE missions SET ${field} = ${field} + 1 WHERE id = $1`, [mission.id]);
+}
+
+// ============================================
+// SEQUÊNCIA REAL
+// GET /api/checkins/:missionId/streak
+// ============================================
+router.get('/:missionId/streak', auth, async (req, res) => {
+  const userId = req.user.userId;
+  try {
+    const missionRes = await db.query(
+      'SELECT * FROM missions WHERE id = $1 AND (user_id = $2 OR partner_id = $2)',
+      [req.params.missionId, userId]
+    );
+    const mission = missionRes.rows[0];
+    if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
+
+    const started  = new Date(mission.started_at);
+    const today    = new Date();
+    const todayDay = Math.floor((today - started) / (1000 * 60 * 60 * 24)) + 1;
+
+    const result = await db.query(
+      `SELECT day_number FROM checkins
+       WHERE mission_id = $1 AND user_id = $2 AND completed = true
+       ORDER BY day_number DESC`,
+      [mission.id, userId]
+    );
+
+    const doneDays = new Set(result.rows.map(r => r.day_number));
+
+    // Calcular sequência consecutiva a partir de hoje para trás
+    let streak = 0;
+    for (let d = todayDay; d >= 1; d--) {
+      if (doneDays.has(d)) streak++;
+      else break;
+    }
+
+    res.json({ streak, total: doneDays.size, today_done: doneDays.has(todayDay) });
+  } catch(err) {
+    res.status(500).json({ error: 'Erro ao calcular sequência.' });
+  }
+});
+
 async function checkMissionCompletion(mission, db) {
   if (!mission.partner_id) return;
-
-  // Completar automaticamente se o tempo da missão acabou
-  const now    = new Date();
-  const endsAt = new Date(mission.ends_at);
-  if (endsAt <= now) {
-    await db.query(
-      `UPDATE missions SET status = 'completed' WHERE id = $1 AND status = 'active'`,
-      [mission.id]
-    );
-    return;
-  }
-
-  // Completar se ambos fizeram check-in no último dia
   const result = await db.query(
     `SELECT user_id FROM checkins WHERE mission_id = $1 AND day_number = $2 AND completed = true`,
     [mission.id, mission.duration_days]

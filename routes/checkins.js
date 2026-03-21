@@ -53,11 +53,6 @@ router.post('/', auth, async (req, res) => {
       [mission_id, userId, dayNumber, note || null]
     );
 
-    // Só incrementar pontuação se for a primeira vez hoje
-    if (!alreadyDone) {
-      await updateScore(mission, userId, db);
-    }
-
     await checkMissionCompletion(mission, db);
 
     res.status(201).json({
@@ -135,13 +130,21 @@ router.get('/:missionId/score', auth, async (req, res) => {
   }
 });
 
-async function updateScore(mission, userId, db) {
-  const field = mission.user_id === userId ? 'user_score' : 'partner_score';
-  await db.query(`UPDATE missions SET ${field} = ${field} + 1 WHERE id = $1`, [mission.id]);
-}
-
 async function checkMissionCompletion(mission, db) {
   if (!mission.partner_id) return;
+
+  // Completar automaticamente se o tempo da missão acabou
+  const now    = new Date();
+  const endsAt = new Date(mission.ends_at);
+  if (endsAt <= now) {
+    await db.query(
+      `UPDATE missions SET status = 'completed' WHERE id = $1 AND status = 'active'`,
+      [mission.id]
+    );
+    return;
+  }
+
+  // Completar se ambos fizeram check-in no último dia
   const result = await db.query(
     `SELECT user_id FROM checkins WHERE mission_id = $1 AND day_number = $2 AND completed = true`,
     [mission.id, mission.duration_days]

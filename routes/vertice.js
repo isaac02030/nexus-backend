@@ -84,10 +84,20 @@ router.get('/message', auth, async (req, res) => {
     );
     const streak = parseInt(streakRes.rows[0].streak);
 
-    // Scores
-    const isUser      = mission.user_id === userId;
-    const userScore   = isUser ? (mission.user_score || 0) : (mission.partner_score || 0);
-    const partnerScore = isUser ? (mission.partner_score || 0) : (mission.user_score || 0);
+    // Scores — ler direto da tabela checkins (fonte da verdade)
+    const scoresRes = await db.query(
+      `SELECT user_id, COUNT(*) as days FROM checkins
+       WHERE mission_id = $1 AND completed = true GROUP BY user_id`,
+      [mission.id]
+    );
+    const scoresMap = scoresRes.rows.reduce((acc, r) => {
+      acc[r.user_id] = parseInt(r.days);
+      return acc;
+    }, {});
+    const isUser       = mission.user_id === userId;
+    const partnerId    = isUser ? mission.partner_id : mission.user_id;
+    const userScore    = scoresMap[userId]    || 0;
+    const partnerScore = scoresMap[partnerId] || 0;
 
     const context = {
       mode: mission.mode,
@@ -122,9 +132,10 @@ router.get('/message', auth, async (req, res) => {
 // (Chamado por um cron job ou manualmente)
 // ============================================
 router.post('/notify-all', async (req, res) => {
-  // Chave secreta para proteger este endpoint
+  // Chave secreta para proteger este endpoint (VERTICE_SECRET, separado do JWT)
   const secret = req.headers['x-vertice-secret'];
-  if (secret !== process.env.JWT_SECRET) {
+  const expected = process.env.VERTICE_SECRET || process.env.JWT_SECRET;
+  if (secret !== expected) {
     return res.status(401).json({ error: 'Não autorizado.' });
   }
 

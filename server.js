@@ -64,6 +64,10 @@ app.use('/api/communities', communityRoutes);
 // --- NOTIFICAÇÕES ---
 const { router: notifRoutes } = require('./routes/notifications');
 app.use('/api/notifications', notifRoutes);
+
+// --- VÉRTICE ---
+const verticeRoutes = require('./routes/vertice');
+app.use('/api/vertice', verticeRoutes);
 // POST /api/messages            → enviar mensagem
 // GET  /api/messages/:missionId → ver conversa
 

@@ -68,6 +68,10 @@ app.use('/api/notifications', notifRoutes);
 // --- VÉRTICE ---
 const verticeRoutes = require('./routes/vertice');
 app.use('/api/vertice', verticeRoutes);
+
+// --- MISSÕES DAS COMUNIDADES ---
+const communityMissionRoutes = require('./routes/community-missions');
+app.use('/api/community-missions', communityMissionRoutes);
 // POST /api/messages            → enviar mensagem
 // GET  /api/messages/:missionId → ver conversa
 

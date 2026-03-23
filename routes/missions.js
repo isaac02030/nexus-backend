@@ -9,14 +9,39 @@ const auth     = require('../middleware/auth');
 const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
+let missionContractReady = false;
+
+async function ensureMissionContractColumns() {
+  if (missionContractReady) return;
+
+  await db.query(`
+    ALTER TABLE missions
+      ADD COLUMN IF NOT EXISTS daily_minimum VARCHAR(120),
+      ADD COLUMN IF NOT EXISTS commitment_window VARCHAR(120),
+      ADD COLUMN IF NOT EXISTS why_it_matters TEXT,
+      ADD COLUMN IF NOT EXISTS fallback_plan TEXT
+  `);
+
+  missionContractReady = true;
+}
 
 // ============================================
 // CRIAR MISSÃO
 // POST /api/missions
-// Body: { title, category, level, mode, description }
+// Body: { title, category, level, mode, description, daily_minimum, commitment_window, why_it_matters, fallback_plan }
 // ============================================
 router.post('/', auth, async (req, res) => {
-  const { title, category, level, mode, description } = req.body;
+  const {
+    title,
+    category,
+    level,
+    mode,
+    description,
+    daily_minimum,
+    commitment_window,
+    why_it_matters,
+    fallback_plan
+  } = req.body;
   const userId = req.user.userId;
 
   if (!title || !category) {
@@ -24,11 +49,27 @@ router.post('/', auth, async (req, res) => {
   }
 
   try {
+    await ensureMissionContractColumns();
+
     const result = await db.query(
-      `INSERT INTO missions (user_id, title, category, level, mode, description)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO missions (
+         user_id, title, category, level, mode, description,
+         daily_minimum, commitment_window, why_it_matters, fallback_plan
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
-      [userId, title, category, level || 'iniciante', mode || 'solo', description]
+      [
+        userId,
+        title,
+        category,
+        level || 'iniciante',
+        mode || 'solo',
+        description || null,
+        daily_minimum || null,
+        commitment_window || null,
+        why_it_matters || null,
+        fallback_plan || null
+      ]
     );
 
     const mission = result.rows[0];
@@ -67,6 +108,8 @@ router.post('/', auth, async (req, res) => {
 // ============================================
 router.get('/:id', auth, async (req, res) => {
   try {
+    await ensureMissionContractColumns();
+
     const result = await db.query(
       `SELECT m.*,
               u1.username AS user_name,
@@ -94,6 +137,8 @@ router.get('/:id', auth, async (req, res) => {
 // ============================================
 router.get('/', auth, async (req, res) => {
   try {
+    await ensureMissionContractColumns();
+
     const result = await db.query(
       `SELECT m.*,
         CASE WHEN m.user_id = $1

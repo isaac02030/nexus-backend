@@ -38,6 +38,10 @@ CREATE TABLE missions (
   title           VARCHAR(255) NOT NULL,     -- ex: "Correr 5km todos os dias"
   category        VARCHAR(100) NOT NULL,     -- ex: "fitness", "aprendizagem", "hábito"
   description     TEXT,
+  daily_minimum   VARCHAR(120),
+  commitment_window VARCHAR(120),
+  why_it_matters  TEXT,
+  fallback_plan   TEXT,
   level           VARCHAR(20) DEFAULT 'iniciante', -- iniciante / intermédio / avançado
 
   -- Modo da missão

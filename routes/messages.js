@@ -1,12 +1,12 @@
 // ============================================
-// NEXUS — Rotas de Mensagens
+// NEXUS - Rotas de Mensagens
 // Chat entre parceiro e rival
 // ============================================
 
-const express  = require('express');
+const express = require('express');
 const { Pool } = require('pg');
-const auth     = require('../middleware/auth');
-const router   = express.Router();
+const auth = require('../middleware/auth');
+const router = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -18,13 +18,13 @@ const db = new Pool({ connectionString: process.env.DATABASE_URL });
 router.post('/', auth, async (req, res) => {
   const { mission_id, content } = req.body;
   const userId = req.user.userId;
+  const trimmedContent = content?.trim();
 
-  if (!mission_id || !content?.trim()) {
-    return res.status(400).json({ error: 'mission_id e content são obrigatórios.' });
+  if (!mission_id || !trimmedContent) {
+    return res.status(400).json({ error: 'mission_id e content sao obrigatorios.' });
   }
 
   try {
-    // Verificar que o utilizador faz parte desta missão
     const missionRes = await db.query(
       `SELECT * FROM missions
        WHERE id = $1 AND (user_id = $2 OR partner_id = $2)`,
@@ -32,32 +32,55 @@ router.post('/', auth, async (req, res) => {
     );
 
     if (!missionRes.rows[0]) {
-      return res.status(403).json({ error: 'Sem acesso a esta missão.' });
+      return res.status(403).json({ error: 'Sem acesso a esta missao.' });
     }
 
-    const result = await db.query(
-      `INSERT INTO messages (mission_id, sender_id, content)
-       VALUES ($1, $2, $3)
-       RETURNING *`,
-      [mission_id, userId, content.trim()]
+    const duplicateRes = await db.query(
+      `SELECT m.*, u.username AS sender_name
+       FROM messages m
+       JOIN users u ON u.id = m.sender_id
+       WHERE m.mission_id = $1
+         AND m.sender_id = $2
+         AND m.content = $3
+         AND m.created_at >= NOW() - INTERVAL '5 seconds'
+       ORDER BY m.created_at DESC
+       LIMIT 1`,
+      [mission_id, userId, trimmedContent]
     );
 
-    res.status(201).json({ message: result.rows[0] });
+    if (duplicateRes.rows[0]) {
+      return res.status(200).json({ message: duplicateRes.rows[0], deduped: true });
+    }
 
+    const insertRes = await db.query(
+      `INSERT INTO messages (mission_id, sender_id, content)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [mission_id, userId, trimmedContent]
+    );
+
+    const messageRes = await db.query(
+      `SELECT m.*, u.username AS sender_name
+       FROM messages m
+       JOIN users u ON u.id = m.sender_id
+       WHERE m.id = $1`,
+      [insertRes.rows[0].id]
+    );
+
+    res.status(201).json({ message: messageRes.rows[0] });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao enviar mensagem.' });
   }
 });
 
 // ============================================
-// VER CONVERSA DE UMA MISSÃO
+// VER CONVERSA DE UMA MISSAO
 // GET /api/messages/:missionId
 // ============================================
 router.get('/:missionId', auth, async (req, res) => {
   const userId = req.user.userId;
 
   try {
-    // Verificar acesso
     const missionRes = await db.query(
       `SELECT * FROM missions
        WHERE id = $1 AND (user_id = $2 OR partner_id = $2)`,
@@ -65,24 +88,22 @@ router.get('/:missionId', auth, async (req, res) => {
     );
 
     if (!missionRes.rows[0]) {
-      return res.status(403).json({ error: 'Sem acesso a esta missão.' });
+      return res.status(403).json({ error: 'Sem acesso a esta missao.' });
     }
 
-    // Buscar mensagens com o nome de quem enviou
     const result = await db.query(
       `SELECT m.*, u.username AS sender_name
        FROM messages m
        JOIN users u ON m.sender_id = u.id
        WHERE m.mission_id = $1
-       ORDER BY m.created_at ASC`,
+       ORDER BY m.created_at ASC, m.id ASC`,
       [req.params.missionId]
     );
 
     res.json({
-      mission_id: parseInt(req.params.missionId),
+      mission_id: parseInt(req.params.missionId, 10),
       messages: result.rows
     });
-
   } catch (err) {
     res.status(500).json({ error: 'Erro ao obter mensagens.' });
   }

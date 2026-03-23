@@ -1,5 +1,5 @@
 // ============================================
-// NEXUS — VÉRTICE
+// NEXUS - GRANDE IRMAO
 // Rota para disparar notificações contextuais
 // ============================================
 
@@ -13,7 +13,7 @@ const router   = express.Router();
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // ============================================
-// OBTER MENSAGEM DO VÉRTICE PARA O UTILIZADOR
+// OBTER MENSAGEM DO GRANDE IRMAO PARA O UTILIZADOR
 // GET /api/vertice/message
 // Usado pelo dashboard para mostrar mensagem contextual
 // ============================================

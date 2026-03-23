@@ -1,5 +1,5 @@
 // ============================================
-// NEXUS — VÉRTICE
+// NEXUS - GRANDE IRMAO
 // Sistema de mensagens contextuais
 // Calmo. Observador. Preciso.
 // ============================================
@@ -179,7 +179,7 @@ function generateNotification(context) {
           rivalDoneToday, partnerDoneToday, userDoneToday,
           position, aheadCount, isWaiting } = context;
 
-  let title = 'VÉRTICE';
+  let title = 'GRANDE IRMAO';
   let body  = '';
 
   // Marco especial

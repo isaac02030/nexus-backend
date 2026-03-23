@@ -75,14 +75,19 @@ router.get('/message', auth, async (req, res) => {
       partnerDoneToday = mission.mode === 'parceiro' ? partnerDone : false;
     }
 
-    // Calcular streak
-    const streakRes = await db.query(
-      `SELECT COUNT(*) as streak FROM checkins
-       WHERE mission_id = $1 AND user_id = $2
-         AND completed = true AND day_number >= $3`,
-      [mission.id, userId, Math.max(1, dayNumber - 6)]
+    const streakDaysRes = await db.query(
+      `SELECT day_number FROM checkins
+       WHERE mission_id = $1 AND user_id = $2 AND completed = true
+       ORDER BY day_number DESC`,
+      [mission.id, userId]
     );
-    const streak = parseInt(streakRes.rows[0].streak);
+    const doneDays = new Set(streakDaysRes.rows.map(r => r.day_number));
+    let streak = 0;
+    for (let d = dayNumber; d >= 1; d--) {
+      if (doneDays.has(d)) streak++;
+      else break;
+    }
+    const recoveryNeeded = dayNumber > 1 && !doneDays.has(dayNumber - 1) && !userDoneToday;
 
     // Scores — ler direto da tabela checkins (fonte da verdade)
     const scoresRes = await db.query(
@@ -108,6 +113,7 @@ router.get('/message', auth, async (req, res) => {
       rivalDoneToday,
       partnerDoneToday,
       userDoneToday,
+      recoveryNeeded,
       isWaiting: false
     };
 

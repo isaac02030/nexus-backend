@@ -10,6 +10,29 @@ const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
+function getCommunityAccess(community) {
+  const isMember = !!community?.is_member;
+  const missionsDone = Number(community?.missions_done) || 0;
+  const totalDays = Number(community?.total_days) || 0;
+  const canReadForum = isMember && (totalDays >= 5 || missionsDone >= 1);
+  const canPostForum = isMember && missionsDone >= 1;
+  const canCreateInternalMissions = isMember && missionsDone >= 1;
+  const canViewInternalMissions = canReadForum;
+
+  return {
+    is_member: isMember,
+    missions_done: missionsDone,
+    total_days: totalDays,
+    can_read_forum: canReadForum,
+    can_post_forum: canPostForum,
+    can_view_internal_missions: canViewInternalMissions,
+    can_create_internal_missions: canCreateInternalMissions,
+    read_requirement: 'Faz 5 check-ins nesta categoria ou conclui 1 missão para desbloquear a leitura da comunidade.',
+    post_requirement: 'Conclui 1 missão nesta categoria para ganhares voz no fórum.',
+    mission_requirement: 'Conclui 1 missão nesta categoria para criares missões internas.'
+  };
+}
+
 // Patentes por missões completadas na categoria
 function getRank(missionsDone) {
   if (missionsDone >= 10) return 'lenda';
@@ -62,6 +85,7 @@ router.get('/:slug', auth, async (req, res) => {
     );
 
     const community = commRes.rows[0];
+    const access = community ? getCommunityAccess(community) : null;
     if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
 
     // Top 10 ranking
@@ -76,20 +100,25 @@ router.get('/:slug', auth, async (req, res) => {
     );
 
     // Posts recentes
-    const postsRes = await db.query(
-      `SELECT cp.*, u.username
-       FROM community_posts cp
-       JOIN users u ON cp.user_id = u.id
-       WHERE cp.community_id = $1
-       ORDER BY cp.created_at DESC
-       LIMIT 20`,
-      [community.id]
-    );
+    let posts = [];
+    if (access.can_read_forum) {
+      const postsRes = await db.query(
+        `SELECT cp.*, u.username
+         FROM community_posts cp
+         JOIN users u ON cp.user_id = u.id
+         WHERE cp.community_id = $1
+         ORDER BY cp.created_at DESC
+         LIMIT 20`,
+        [community.id]
+      );
+      posts = postsRes.rows;
+    }
 
     res.json({
       community,
       ranking: rankRes.rows,
-      posts: postsRes.rows
+      posts,
+      access
     });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao obter comunidade.' });

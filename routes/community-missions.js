@@ -18,11 +18,26 @@ router.get('/:slug', auth, async (req, res) => {
   const userId = req.user.userId;
   try {
     const commRes = await db.query(
-      'SELECT * FROM communities WHERE slug = $1',
-      [req.params.slug]
+      `SELECT c.*, cm.missions_done, cm.total_days
+       FROM communities c
+       LEFT JOIN community_members cm ON cm.community_id = c.id AND cm.user_id = $1
+       WHERE c.slug = $2`,
+      [userId, req.params.slug]
     );
     const community = commRes.rows[0];
     if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
+
+    const missionsDone = Number(community.missions_done) || 0;
+    const totalDays = Number(community.total_days) || 0;
+    const canViewMissions = totalDays >= 5 || missionsDone >= 1;
+
+    if (!canViewMissions) {
+      return res.json({
+        missions: [],
+        locked: true,
+        access_message: 'Faz 5 check-ins nesta categoria ou conclui 1 missão para ver e entrar em missões internas.'
+      });
+    }
 
     const result = await db.query(
       `SELECT cm.*,

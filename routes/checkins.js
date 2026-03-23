@@ -36,6 +36,22 @@ function calculateBrio(doneDays, todayDay, streak) {
   return { brio, consistency, recovered: recoveredAfterMiss };
 }
 
+function calculateRecoveryState(doneDays, todayDay) {
+  const missedYesterday = todayDay > 1 && !doneDays.has(todayDay - 1);
+  let missedDays = 0;
+
+  for (let day = todayDay; day >= 1; day--) {
+    if (doneDays.has(day)) break;
+    missedDays++;
+  }
+
+  return {
+    missed_yesterday: missedYesterday,
+    missed_days: missedDays,
+    recovery_needed: missedYesterday && !doneDays.has(todayDay)
+  };
+}
+
 router.post('/', auth, async (req, res) => {
   const { mission_id, note } = req.body;
   const userId = req.user.userId;
@@ -223,8 +239,17 @@ router.get('/:missionId/streak', auth, async (req, res) => {
     // Total de dias completados
     const total = doneDays.size;
     const { brio, consistency, recovered } = calculateBrio(doneDays, todayDay, streak);
+    const recovery = calculateRecoveryState(doneDays, todayDay);
 
-    res.json({ streak, total, today_done: doneDays.has(todayDay), brio, consistency, recovered });
+    res.json({
+      streak,
+      total,
+      today_done: doneDays.has(todayDay),
+      brio,
+      consistency,
+      recovered,
+      ...recovery
+    });
   } catch(err) {
     res.status(500).json({ error: 'Erro ao calcular sequência.' });
   }
@@ -270,7 +295,16 @@ router.get('/:missionId/streak', auth, async (req, res) => {
     }
 
     const { brio, consistency, recovered } = calculateBrio(doneDays, todayDay, streak);
-    res.json({ streak, total: doneDays.size, today_done: doneDays.has(todayDay), brio, consistency, recovered });
+    const recovery = calculateRecoveryState(doneDays, todayDay);
+    res.json({
+      streak,
+      total: doneDays.size,
+      today_done: doneDays.has(todayDay),
+      brio,
+      consistency,
+      recovered,
+      ...recovery
+    });
   } catch(err) {
     res.status(500).json({ error: 'Erro ao calcular sequência.' });
   }

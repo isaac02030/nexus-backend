@@ -10,6 +10,25 @@ const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
+const CATEGORY_PROGRESS_SELECT = `
+  COALESCE((
+    SELECT COUNT(DISTINCT ch.day_number)
+    FROM missions m2
+    JOIN checkins ch ON ch.mission_id = m2.id
+    WHERE ch.user_id = $1
+      AND ch.completed = true
+      AND m2.category = c.category
+      AND (m2.user_id = $1 OR m2.partner_id = $1)
+  ), 0) AS total_days,
+  COALESCE((
+    SELECT COUNT(*)
+    FROM missions m3
+    WHERE (m3.user_id = $1 OR m3.partner_id = $1)
+      AND m3.category = c.category
+      AND m3.status = 'completed'
+  ), 0) AS missions_done
+`;
+
 // ============================================
 // LISTAR MISSÕES DE UMA COMUNIDADE
 // GET /api/community-missions/:slug
@@ -18,7 +37,7 @@ router.get('/:slug', auth, async (req, res) => {
   const userId = req.user.userId;
   try {
     const commRes = await db.query(
-      `SELECT c.*, cm.missions_done, cm.total_days
+      `SELECT c.*, ${CATEGORY_PROGRESS_SELECT}
        FROM communities c
        LEFT JOIN community_members cm ON cm.community_id = c.id AND cm.user_id = $1
        WHERE c.slug = $2`,
@@ -78,7 +97,14 @@ router.post('/:slug', auth, async (req, res) => {
   try {
     // Verificar se é membro da comunidade
     const commRes = await db.query(
-      `SELECT c.*, cm.rank, cm.missions_done
+      `SELECT c.*, cm.rank,
+        COALESCE((
+          SELECT COUNT(*)
+          FROM missions m
+          WHERE (m.user_id = $1 OR m.partner_id = $1)
+            AND m.category = c.category
+            AND m.status = 'completed'
+        ), 0) AS missions_done
        FROM communities c
        JOIN community_members cm ON cm.community_id = c.id AND cm.user_id = $1
        WHERE c.slug = $2`,

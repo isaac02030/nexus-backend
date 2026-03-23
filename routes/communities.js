@@ -10,6 +10,25 @@ const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
+const CATEGORY_PROGRESS_SELECT = `
+  COALESCE((
+    SELECT COUNT(DISTINCT ch.day_number)
+    FROM missions m2
+    JOIN checkins ch ON ch.mission_id = m2.id
+    WHERE ch.user_id = $1
+      AND ch.completed = true
+      AND m2.category = c.category
+      AND (m2.user_id = $1 OR m2.partner_id = $1)
+  ), 0) AS total_days,
+  COALESCE((
+    SELECT COUNT(*)
+    FROM missions m3
+    WHERE (m3.user_id = $1 OR m3.partner_id = $1)
+      AND m3.category = c.category
+      AND m3.status = 'completed'
+  ), 0) AS missions_done
+`;
+
 function getCommunityAccess(community) {
   const isMember = !!community?.is_member;
   const missionsDone = Number(community?.missions_done) || 0;
@@ -53,7 +72,7 @@ router.get('/', auth, async (req, res) => {
       `SELECT c.*,
         CASE WHEN cm.user_id IS NOT NULL THEN true ELSE false END AS is_member,
         cm.rank AS my_rank,
-        cm.missions_done
+        ${CATEGORY_PROGRESS_SELECT}
        FROM communities c
        LEFT JOIN community_members cm
          ON cm.community_id = c.id AND cm.user_id = $1
@@ -76,7 +95,8 @@ router.get('/:slug', auth, async (req, res) => {
     const commRes = await db.query(
       `SELECT c.*,
         CASE WHEN cm.user_id IS NOT NULL THEN true ELSE false END AS is_member,
-        cm.rank AS my_rank, cm.missions_done, cm.total_days
+        cm.rank AS my_rank,
+        ${CATEGORY_PROGRESS_SELECT}
        FROM communities c
        LEFT JOIN community_members cm
          ON cm.community_id = c.id AND cm.user_id = $1

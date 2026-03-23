@@ -10,6 +10,32 @@ const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
+function calculateBrio(doneDays, todayDay, streak) {
+  const completedDays = doneDays.size;
+  const totalDays = Math.max(todayDay, 1);
+  const consistency = Math.round((completedDays / totalDays) * 100);
+
+  let recoveredAfterMiss = false;
+  let seenMiss = false;
+  for (let day = 1; day <= todayDay; day++) {
+    if (doneDays.has(day)) {
+      if (seenMiss) {
+        recoveredAfterMiss = true;
+        break;
+      }
+    } else {
+      seenMiss = true;
+    }
+  }
+
+  const consistencyPart = Math.round(consistency * 0.6);
+  const streakPart = Math.min(streak * 6, 24);
+  const recoveryPart = completedDays === 0 ? 0 : (recoveredAfterMiss ? 16 : 8);
+  const brio = Math.min(100, consistencyPart + streakPart + recoveryPart);
+
+  return { brio, consistency, recovered: recoveredAfterMiss };
+}
+
 router.post('/', auth, async (req, res) => {
   const { mission_id, note } = req.body;
   const userId = req.user.userId;
@@ -121,6 +147,26 @@ router.get('/:missionId/score', auth, async (req, res) => {
       return acc;
     }, {});
 
+    // Calcular sequência atual (dias consecutivos a partir do dia de hoje)
+    let myStreak = 0;
+    if (mission.started_at) {
+      const started    = new Date(mission.started_at);
+      const today      = new Date();
+      const currentDay = Math.floor((today - started) / (1000 * 60 * 60 * 24)) + 1;
+
+      const streakRes = await db.query(
+        `SELECT day_number FROM checkins
+         WHERE mission_id = $1 AND user_id = $2 AND completed = true
+         ORDER BY day_number DESC`,
+        [req.params.missionId, req.user.userId]
+      );
+      const doneSet = new Set(streakRes.rows.map(r => r.day_number));
+      for (let d = currentDay; d >= 1; d--) {
+        if (doneSet.has(d)) myStreak++;
+        else break;
+      }
+    }
+
     res.json({
       mission_id: mission.id,
       mode: mission.mode,
@@ -128,7 +174,8 @@ router.get('/:missionId/score', auth, async (req, res) => {
         [mission.user_name]:    scores[mission.user_id]    || 0,
         [mission.partner_name]: scores[mission.partner_id] || 0
       },
-      leader: getLeader(mission, scores)
+      leader: getLeader(mission, scores),
+      my_streak: myStreak
     });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao obter placar.' });
@@ -175,8 +222,9 @@ router.get('/:missionId/streak', auth, async (req, res) => {
 
     // Total de dias completados
     const total = doneDays.size;
+    const { brio, consistency, recovered } = calculateBrio(doneDays, todayDay, streak);
 
-    res.json({ streak, total, today_done: doneDays.has(todayDay) });
+    res.json({ streak, total, today_done: doneDays.has(todayDay), brio, consistency, recovered });
   } catch(err) {
     res.status(500).json({ error: 'Erro ao calcular sequência.' });
   }
@@ -221,7 +269,8 @@ router.get('/:missionId/streak', auth, async (req, res) => {
       else break;
     }
 
-    res.json({ streak, total: doneDays.size, today_done: doneDays.has(todayDay) });
+    const { brio, consistency, recovered } = calculateBrio(doneDays, todayDay, streak);
+    res.json({ streak, total: doneDays.size, today_done: doneDays.has(todayDay), brio, consistency, recovered });
   } catch(err) {
     res.status(500).json({ error: 'Erro ao calcular sequência.' });
   }

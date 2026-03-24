@@ -183,6 +183,9 @@ function getMissionSpecificBody(context) {
     userDoneToday,
     recoveryNeeded,
     dailyMinimum,
+    commitmentWindow,
+    whyItMatters,
+    studyFocus,
     studyCurrentStage,
     studyTargetOutcome,
     latestProof
@@ -190,18 +193,19 @@ function getMissionSpecificBody(context) {
 
   if (category === 'aprendizagem') {
     const minimum = dailyMinimum || '1 bloco focado';
+    const focus = studyFocus || 'o estudo de hoje';
     const stage = studyCurrentStage || 'o bloco atual';
     const target = studyTargetOutcome || 'o fecho destes 30 dias';
 
     if (userDoneToday) {
-      return `Registo fechado em ${stage}. O proximo bloco aproxima ${target}.`;
+      return `Registo fechado em ${focus}, bloco ${stage}. O proximo passo aproxima ${target}.`;
     }
 
     if (recoveryNeeded) {
-      return `Nao avances sem base. Fecha ${minimum} em ${stage} e volta a por ordem no estudo.`;
+      return `Nao avances sem base. Fecha ${minimum} em ${stage} e volta a por ordem em ${focus}.`;
     }
 
-    return `Ainda falta ${minimum} em ${stage}. Sem clareza, o estudo espalha-se.`;
+    return `Ainda falta ${minimum} em ${stage}. Sem clareza, ${focus} espalha-se.`;
   }
 
   if (category === 'fitness') {
@@ -212,6 +216,37 @@ function getMissionSpecificBody(context) {
     if (!userDoneToday) {
       return 'Sem prova, fica intencao.';
     }
+  }
+
+  if (category === 'criatividade') {
+    const minimum = dailyMinimum || '1 saida pequena';
+    const windowText = commitmentWindow || 'a janela prometida';
+
+    if (userDoneToday && latestProof) {
+      return `Saida registada. ${latestProof}`;
+    }
+
+    if (recoveryNeeded) {
+      return `Nao procures brilho. Procura entrega. Fecha ${minimum} em ${windowText} e poe algo no registo.`;
+    }
+
+    return `Hoje ainda falta uma saida. Fecha ${minimum} em ${windowText}. Sem artefacto, fica so intencao.`;
+  }
+
+  if (category === 'habito') {
+    const minimum = dailyMinimum || 'a versao minima do habito';
+    const windowText = commitmentWindow || 'a janela prometida';
+    const motive = whyItMatters || 'o motivo que deste a esta promessa';
+
+    if (userDoneToday) {
+      return `Registo feito. O habito nao pede entusiasmo. Pede repeticao. Amanhã voltas em ${windowText}.`;
+    }
+
+    if (recoveryNeeded) {
+      return `Ontem falhou. Hoje fecha ${minimum} em ${windowText}. O motivo continua: ${motive}.`;
+    }
+
+    return `Ainda falta ${minimum}. O habito forma-se quando deixas de discutir com ${motive}.`;
   }
 
   return null;
@@ -244,7 +279,7 @@ function generateNotification(context) {
     return { title, body: missionSpecificBody || body };
   }
 
-  if (missionSpecificBody && (category === 'aprendizagem' || category === 'fitness')) {
+  if (missionSpecificBody && ['aprendizagem', 'fitness', 'criatividade', 'habito'].includes(category)) {
     return { title, body: missionSpecificBody };
   }
 

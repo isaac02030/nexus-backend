@@ -60,6 +60,7 @@ router.get('/message', auth, async (req, res) => {
       [mission.id, userId, dayNumber]
     );
     const userDoneToday = userCheckinRes.rows.length > 0 && userCheckinRes.rows[0].completed;
+    const latestProof = userCheckinRes.rows[0]?.note || null;
 
     let rivalDoneToday   = false;
     let partnerDoneToday = false;
@@ -106,6 +107,7 @@ router.get('/message', auth, async (req, res) => {
 
     const context = {
       mode: mission.mode,
+      category: mission.category,
       dayNumber,
       streak,
       userScore,
@@ -114,6 +116,10 @@ router.get('/message', auth, async (req, res) => {
       partnerDoneToday,
       userDoneToday,
       recoveryNeeded,
+      dailyMinimum: mission.daily_minimum,
+      studyCurrentStage: mission.study_current_stage,
+      studyTargetOutcome: mission.study_target_outcome,
+      latestProof,
       isWaiting: false
     };
 

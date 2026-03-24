@@ -177,9 +177,50 @@ function getMessage(category, key, vars = {}) {
   return msg;
 }
 
+function getMissionSpecificBody(context) {
+  const {
+    category,
+    userDoneToday,
+    recoveryNeeded,
+    dailyMinimum,
+    studyCurrentStage,
+    studyTargetOutcome,
+    latestProof
+  } = context;
+
+  if (category === 'aprendizagem') {
+    const minimum = dailyMinimum || '1 bloco focado';
+    const stage = studyCurrentStage || 'o bloco atual';
+    const target = studyTargetOutcome || 'o fecho destes 30 dias';
+
+    if (userDoneToday) {
+      return `Registo fechado em ${stage}. O proximo bloco aproxima ${target}.`;
+    }
+
+    if (recoveryNeeded) {
+      return `Nao avances sem base. Fecha ${minimum} em ${stage} e volta a por ordem no estudo.`;
+    }
+
+    return `Ainda falta ${minimum} em ${stage}. Sem clareza, o estudo espalha-se.`;
+  }
+
+  if (category === 'fitness') {
+    if (userDoneToday && latestProof) {
+      return `Prova registada. ${latestProof}`;
+    }
+
+    if (!userDoneToday) {
+      return 'Sem prova, fica intencao.';
+    }
+  }
+
+  return null;
+}
+
 function generateNotification(context) {
   const {
     mode,
+    category,
     dayNumber,
     streak,
     userScore,
@@ -195,11 +236,16 @@ function generateNotification(context) {
 
   const title = 'GRANDE IRMAO';
   let body = '';
+  const missionSpecificBody = getMissionSpecificBody(context);
 
   if ([7, 14, 21, 30].includes(dayNumber) && userDoneToday) {
     const key = `day_${dayNumber}`;
     body = getMessage('milestones', key) || `Dia ${dayNumber}.`;
-    return { title, body };
+    return { title, body: missionSpecificBody || body };
+  }
+
+  if (missionSpecificBody && (category === 'aprendizagem' || category === 'fitness')) {
+    return { title, body: missionSpecificBody };
   }
 
   if (mode === 'solo' || isWaiting) {

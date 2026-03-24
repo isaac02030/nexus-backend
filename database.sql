@@ -42,6 +42,9 @@ CREATE TABLE missions (
   commitment_window VARCHAR(120),
   why_it_matters  TEXT,
   fallback_plan   TEXT,
+  study_focus     VARCHAR(160),
+  study_current_stage VARCHAR(160),
+  study_target_outcome TEXT,
   level           VARCHAR(20) DEFAULT 'iniciante', -- iniciante / intermédio / avançado
 
   -- Modo da missão

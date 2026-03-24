@@ -69,6 +69,9 @@ router.post('/', auth, async (req, res) => {
     const mission = missionRes.rows[0];
     if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
     if (mission.status !== 'active') return res.status(400).json({ error: 'Missão não está ativa.' });
+    if (mission.category === 'fitness' && (!note || note.trim().length < 8)) {
+      return res.status(400).json({ error: 'Missoes fitness exigem uma prova curta do treino.' });
+    }
 
     const started   = new Date(mission.started_at);
     const today     = new Date();
@@ -331,3 +334,5 @@ function getLeader(mission, scores) {
 }
 
 module.exports = router;
+
+

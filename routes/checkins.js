@@ -10,6 +10,28 @@ const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
+function getProofValidation(proofMode, note) {
+  const text = (note || '').trim();
+
+  if (proofMode === 'workout_proof' && text.length < 8) {
+    return 'Esta missao exige uma prova curta antes do check-in.';
+  }
+
+  if (proofMode === 'study_note' && text.length < 12) {
+    return 'Esta missao de estudo exige uma nota curta com o que estudaste hoje.';
+  }
+
+  if (proofMode === 'artifact_note' && text.length < 12) {
+    return 'Esta missao exige um registo curto do que produziste hoje.';
+  }
+
+  if (proofMode === 'text_note' && text.length < 8) {
+    return 'Esta missao exige uma nota curta antes do check-in.';
+  }
+
+  return null;
+}
+
 function calculateBrio(doneDays, todayDay, streak) {
   const completedDays = doneDays.size;
   const totalDays = Math.max(todayDay, 1);
@@ -69,8 +91,9 @@ router.post('/', auth, async (req, res) => {
     const mission = missionRes.rows[0];
     if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
     if (mission.status !== 'active') return res.status(400).json({ error: 'Missão não está ativa.' });
-    if (mission.proof_mode === 'workout_proof' && (!note || note.trim().length < 8)) {
-      return res.status(400).json({ error: 'Esta missao exige uma prova curta antes do check-in.' });
+    const proofError = getProofValidation(mission.proof_mode, note);
+    if (proofError) {
+      return res.status(400).json({ error: proofError });
     }
 
     const started   = new Date(mission.started_at);

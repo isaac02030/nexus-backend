@@ -42,6 +42,7 @@ CREATE TABLE missions (
   commitment_window VARCHAR(120),
   why_it_matters  TEXT,
   fallback_plan   TEXT,
+  proof_mode      VARCHAR(40) DEFAULT 'self_report',
   study_focus     VARCHAR(160),
   study_current_stage VARCHAR(160),
   study_target_outcome TEXT,

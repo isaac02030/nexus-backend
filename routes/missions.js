@@ -20,6 +20,7 @@ async function ensureMissionContractColumns() {
       ADD COLUMN IF NOT EXISTS commitment_window VARCHAR(120),
       ADD COLUMN IF NOT EXISTS why_it_matters TEXT,
       ADD COLUMN IF NOT EXISTS fallback_plan TEXT,
+      ADD COLUMN IF NOT EXISTS proof_mode VARCHAR(40),
       ADD COLUMN IF NOT EXISTS study_focus VARCHAR(160),
       ADD COLUMN IF NOT EXISTS study_current_stage VARCHAR(160),
       ADD COLUMN IF NOT EXISTS study_target_outcome TEXT
@@ -31,7 +32,7 @@ async function ensureMissionContractColumns() {
 // ============================================
 // CRIAR MISSÃO
 // POST /api/missions
-// Body: { title, category, level, mode, description, daily_minimum, commitment_window, why_it_matters, fallback_plan, study_focus, study_current_stage, study_target_outcome }
+// Body: { title, category, level, mode, description, daily_minimum, commitment_window, why_it_matters, fallback_plan, proof_mode, study_focus, study_current_stage, study_target_outcome }
 // ============================================
 router.post('/', auth, async (req, res) => {
   const {
@@ -44,6 +45,7 @@ router.post('/', auth, async (req, res) => {
     commitment_window,
     why_it_matters,
     fallback_plan,
+    proof_mode,
     study_focus,
     study_current_stage,
     study_target_outcome
@@ -60,10 +62,10 @@ router.post('/', auth, async (req, res) => {
     const result = await db.query(
       `INSERT INTO missions (
          user_id, title, category, level, mode, description,
-         daily_minimum, commitment_window, why_it_matters, fallback_plan,
+         daily_minimum, commitment_window, why_it_matters, fallback_plan, proof_mode,
          study_focus, study_current_stage, study_target_outcome
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [
         userId,
@@ -76,6 +78,7 @@ router.post('/', auth, async (req, res) => {
         commitment_window || null,
         why_it_matters || null,
         fallback_plan || null,
+        proof_mode || 'self_report',
         study_focus || null,
         study_current_stage || null,
         study_target_outcome || null

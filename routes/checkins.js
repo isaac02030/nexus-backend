@@ -69,8 +69,8 @@ router.post('/', auth, async (req, res) => {
     const mission = missionRes.rows[0];
     if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
     if (mission.status !== 'active') return res.status(400).json({ error: 'Missão não está ativa.' });
-    if (mission.category === 'fitness' && (!note || note.trim().length < 8)) {
-      return res.status(400).json({ error: 'Missoes fitness exigem uma prova curta do treino.' });
+    if (mission.proof_mode === 'workout_proof' && (!note || note.trim().length < 8)) {
+      return res.status(400).json({ error: 'Esta missao exige uma prova curta antes do check-in.' });
     }
 
     const started   = new Date(mission.started_at);

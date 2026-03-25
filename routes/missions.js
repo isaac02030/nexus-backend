@@ -147,7 +147,7 @@ router.get('/', auth, async (req, res) => {
           ELSE m.user_id
         END AS counterpart_user_id,
         (
-          SELECT MAX(c.day)
+          SELECT MAX(c.day_number)
           FROM checkins c
           WHERE c.mission_id = m.id
             AND c.completed = true

@@ -178,6 +178,59 @@ router.delete('/:id/waiting', auth, async (req, res) => {
   }
 });
 
+router.post('/:id/abandon', auth, async (req, res) => {
+  const missionId = req.params.id;
+  const userId = req.user.userId;
+
+  try {
+    const result = await db.query(
+      `SELECT *
+       FROM missions
+       WHERE id = $1
+         AND status = 'active'
+         AND (user_id = $2 OR partner_id = $2)
+       LIMIT 1`,
+      [missionId, userId]
+    );
+
+    const mission = result.rows[0];
+
+    if (!mission) {
+      return res.status(404).json({ error: 'Missao ativa nao encontrada.' });
+    }
+
+    if (!mission.partner_id || mission.mode === 'solo') {
+      return res.status(400).json({ error: 'Esta acao so existe para missoes emparelhadas.' });
+    }
+
+    if (mission.partner_id === userId) {
+      await db.query(
+        `UPDATE missions
+         SET partner_id = NULL,
+             mode = 'solo'
+         WHERE id = $1`,
+        [missionId]
+      );
+    } else {
+      await db.query(
+        `UPDATE missions
+         SET user_id = partner_id,
+             partner_id = NULL,
+             mode = 'solo'
+         WHERE id = $1`,
+        [missionId]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Saíste da missão. A outra pessoa continua em solo.'
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao sair da missao.' });
+  }
+});
+
 async function findMatch(newMission, currentUserId, db) {
   const exact = await db.query(
     `SELECT * FROM missions

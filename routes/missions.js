@@ -141,7 +141,21 @@ router.get('/', auth, async (req, res) => {
         CASE WHEN m.user_id = $1
           THEN u2.username
           ELSE u1.username
-        END AS partner_name
+        END AS partner_name,
+        CASE WHEN m.user_id = $1
+          THEN m.partner_id
+          ELSE m.user_id
+        END AS counterpart_user_id,
+        (
+          SELECT MAX(c.day)
+          FROM checkins c
+          WHERE c.mission_id = m.id
+            AND c.completed = true
+            AND c.user_id = CASE
+              WHEN m.user_id = $1 THEN m.partner_id
+              ELSE m.user_id
+            END
+        ) AS partner_last_checkin_day
        FROM missions m
        LEFT JOIN users u1 ON m.user_id = u1.id
        LEFT JOIN users u2 ON m.partner_id = u2.id
@@ -228,6 +242,59 @@ router.post('/:id/abandon', auth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao sair da missao.' });
+  }
+});
+
+router.post('/:id/continue-solo', auth, async (req, res) => {
+  const missionId = req.params.id;
+  const userId = req.user.userId;
+
+  try {
+    const result = await db.query(
+      `SELECT *
+       FROM missions
+       WHERE id = $1
+         AND status = 'active'
+         AND (user_id = $2 OR partner_id = $2)
+       LIMIT 1`,
+      [missionId, userId]
+    );
+
+    const mission = result.rows[0];
+
+    if (!mission) {
+      return res.status(404).json({ error: 'Missao ativa nao encontrada.' });
+    }
+
+    if (!mission.partner_id || mission.mode === 'solo') {
+      return res.status(400).json({ error: 'Esta missao ja esta em solo.' });
+    }
+
+    if (mission.user_id === userId) {
+      await db.query(
+        `UPDATE missions
+         SET partner_id = NULL,
+             mode = 'solo'
+         WHERE id = $1`,
+        [missionId]
+      );
+    } else {
+      await db.query(
+        `UPDATE missions
+         SET user_id = $2,
+             partner_id = NULL,
+             mode = 'solo'
+         WHERE id = $1`,
+        [missionId, userId]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'A missão agora continua em solo, sem perder o teu progresso.'
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao continuar em solo.' });
   }
 });
 

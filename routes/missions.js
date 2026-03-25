@@ -156,6 +156,28 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
+router.delete('/:id/waiting', auth, async (req, res) => {
+  const missionId = req.params.id;
+  const userId = req.user.userId;
+
+  try {
+    const result = await db.query(
+      `DELETE FROM missions
+       WHERE id = $1 AND user_id = $2 AND status = 'waiting'
+       RETURNING id`,
+      [missionId, userId]
+    );
+
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Missao em espera nao encontrada.' });
+    }
+
+    res.json({ success: true, message: 'Saíste da fila de espera.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao sair da fila.' });
+  }
+});
+
 async function findMatch(newMission, currentUserId, db) {
   const exact = await db.query(
     `SELECT * FROM missions

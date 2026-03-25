@@ -69,6 +69,10 @@ app.use('/api/notifications', notifRoutes);
 const verticeRoutes = require('./routes/vertice');
 app.use('/api/vertice', verticeRoutes);
 
+// --- INSIGHTS ---
+const insightsRoutes = require('./routes/insights');
+app.use('/api/insights', insightsRoutes);
+
 // --- MISSÕES DAS COMUNIDADES ---
 const communityMissionRoutes = require('./routes/community-missions');
 app.use('/api/community-missions', communityMissionRoutes);

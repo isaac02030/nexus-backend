@@ -11,6 +11,7 @@ const router = express.Router();
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 let missionContractReady = false;
 let missionParticipantHealingReady = false;
+let soloMissionHealingReady = false;
 
 function missionParticipantWhere(alias = 'm', userParam = '$1') {
   return `(
@@ -85,6 +86,21 @@ async function healPairedMissionParticipants() {
   missionParticipantHealingReady = true;
 }
 
+async function healWaitingSoloMissions() {
+  if (soloMissionHealingReady) return;
+
+  await db.query(`
+    UPDATE missions
+    SET status = 'active',
+        started_at = COALESCE(started_at, created_at, NOW()),
+        ends_at = COALESCE(ends_at, COALESCE(started_at, created_at, NOW()) + INTERVAL '30 days')
+    WHERE mode = 'solo'
+      AND status = 'waiting'
+  `);
+
+  soloMissionHealingReady = true;
+}
+
 router.post('/', auth, async (req, res) => {
   const {
     title,
@@ -110,6 +126,7 @@ router.post('/', auth, async (req, res) => {
   try {
     await ensureMissionContractColumns();
     await healPairedMissionParticipants();
+    await healWaitingSoloMissions();
 
     const result = await db.query(
       `INSERT INTO missions (
@@ -138,6 +155,27 @@ router.post('/', auth, async (req, res) => {
     );
 
     const mission = result.rows[0];
+
+    if (mission.mode === 'solo') {
+      const now = new Date();
+      const endsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+      const activated = await db.query(
+        `UPDATE missions
+         SET status = 'active',
+             started_at = $1,
+             ends_at = $2
+         WHERE id = $3
+         RETURNING *`,
+        [now, endsAt, mission.id]
+      );
+
+      return res.status(201).json({
+        mission: activated.rows[0],
+        matched: false,
+        message: 'Missao solo criada.'
+      });
+    }
 
     if (mode === 'parceiro' || mode === 'rival') {
       const match = await findMatch(mission, userId, db);
@@ -168,6 +206,7 @@ router.get('/:id', auth, async (req, res) => {
   try {
     await ensureMissionContractColumns();
     await healPairedMissionParticipants();
+    await healWaitingSoloMissions();
 
     const result = await db.query(
       `SELECT m.*,
@@ -195,6 +234,7 @@ router.get('/', auth, async (req, res) => {
   try {
     await ensureMissionContractColumns();
     await healPairedMissionParticipants();
+    await healWaitingSoloMissions();
 
     const result = await db.query(
       `SELECT m.*,

@@ -11,6 +11,23 @@ const router = express.Router();
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 let missionContractReady = false;
 
+function missionParticipantWhere(alias = 'm', userParam = '$1') {
+  return `(
+    ${alias}.user_id = ${userParam}
+    OR ${alias}.partner_id = ${userParam}
+    OR EXISTS (
+      SELECT 1 FROM checkins c
+      WHERE c.mission_id = ${alias}.id
+        AND c.user_id = ${userParam}
+    )
+    OR EXISTS (
+      SELECT 1 FROM messages msg
+      WHERE msg.mission_id = ${alias}.id
+        AND msg.sender_id = ${userParam}
+    )
+  )`;
+}
+
 async function ensureMissionContractColumns() {
   if (missionContractReady) return;
 
@@ -118,8 +135,9 @@ router.get('/:id', auth, async (req, res) => {
        FROM missions m
        LEFT JOIN users u1 ON m.user_id = u1.id
        LEFT JOIN users u2 ON m.partner_id = u2.id
-       WHERE m.id = $1`,
-      [req.params.id]
+       WHERE m.id = $1
+         AND ${missionParticipantWhere('m', '$2')}`,
+      [req.params.id, req.user.userId]
     );
 
     if (!result.rows[0]) {
@@ -155,11 +173,11 @@ router.get('/', auth, async (req, res) => {
               WHEN m.user_id = $1 THEN m.partner_id
               ELSE m.user_id
             END
-        ) AS partner_last_checkin_day
+       ) AS partner_last_checkin_day
        FROM missions m
        LEFT JOIN users u1 ON m.user_id = u1.id
        LEFT JOIN users u2 ON m.partner_id = u2.id
-       WHERE m.user_id = $1 OR m.partner_id = $1
+       WHERE ${missionParticipantWhere('m', '$1')}
        ORDER BY m.created_at DESC`,
       [req.user.userId]
     );

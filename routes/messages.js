@@ -10,6 +10,23 @@ const router = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
+function missionParticipantWhere(alias = 'm', userParam = '$2') {
+  return `(
+    ${alias}.user_id = ${userParam}
+    OR ${alias}.partner_id = ${userParam}
+    OR EXISTS (
+      SELECT 1 FROM checkins c
+      WHERE c.mission_id = ${alias}.id
+        AND c.user_id = ${userParam}
+    )
+    OR EXISTS (
+      SELECT 1 FROM messages msg
+      WHERE msg.mission_id = ${alias}.id
+        AND msg.sender_id = ${userParam}
+    )
+  )`;
+}
+
 // ============================================
 // ENVIAR MENSAGEM
 // POST /api/messages
@@ -26,8 +43,9 @@ router.post('/', auth, async (req, res) => {
 
   try {
     const missionRes = await db.query(
-      `SELECT * FROM missions
-       WHERE id = $1 AND (user_id = $2 OR partner_id = $2)`,
+      `SELECT * FROM missions m
+       WHERE id = $1
+         AND ${missionParticipantWhere('m', '$2')}`,
       [mission_id, userId]
     );
 
@@ -82,8 +100,9 @@ router.get('/:missionId', auth, async (req, res) => {
 
   try {
     const missionRes = await db.query(
-      `SELECT * FROM missions
-       WHERE id = $1 AND (user_id = $2 OR partner_id = $2)`,
+      `SELECT * FROM missions m
+       WHERE id = $1
+         AND ${missionParticipantWhere('m', '$2')}`,
       [req.params.missionId, userId]
     );
 

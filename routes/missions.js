@@ -11,7 +11,6 @@ const router = express.Router();
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 let missionContractReady = false;
 let missionParticipantHealingReady = false;
-let soloMissionHealingReady = false;
 
 function missionParticipantWhere(alias = 'm', userParam = '$1') {
   return `(
@@ -87,8 +86,6 @@ async function healPairedMissionParticipants() {
 }
 
 async function healWaitingSoloMissions() {
-  if (soloMissionHealingReady) return;
-
   await db.query(`
     UPDATE missions
     SET status = 'active',
@@ -97,8 +94,6 @@ async function healWaitingSoloMissions() {
     WHERE mode = 'solo'
       AND status = 'waiting'
   `);
-
-  soloMissionHealingReady = true;
 }
 
 router.post('/', auth, async (req, res) => {

@@ -69,6 +69,10 @@ app.use('/api/notifications', notifRoutes);
 const verticeRoutes = require('./routes/vertice');
 app.use('/api/vertice', verticeRoutes);
 
+// --- ASSISTENTE IA ---
+const assistantRoutes = require('./routes/assistant');
+app.use('/api/assistant', assistantRoutes);
+
 // --- INSIGHTS ---
 const insightsRoutes = require('./routes/insights');
 app.use('/api/insights', insightsRoutes);

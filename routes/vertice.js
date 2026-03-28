@@ -19,10 +19,11 @@ const db = new Pool({ connectionString: process.env.DATABASE_URL });
 // ============================================
 router.get('/message', auth, async (req, res) => {
   const userId = req.user.userId;
+  const missionId = req.query.mission_id ? Number(req.query.mission_id) : null;
 
   try {
     // Buscar missão ativa ou em espera
-    const missionRes = await db.query(
+    let missionRes = await db.query(
       `SELECT m.*, u.username AS partner_name
        FROM missions m
        LEFT JOIN users u ON (
@@ -33,6 +34,21 @@ router.get('/message', auth, async (req, res) => {
        ORDER BY m.created_at DESC LIMIT 1`,
       [userId]
     );
+
+    if (missionId) {
+      missionRes = await db.query(
+        `SELECT m.*, u.username AS partner_name
+         FROM missions m
+         LEFT JOIN users u ON (
+           CASE WHEN m.user_id = $1 THEN m.partner_id ELSE m.user_id END = u.id
+         )
+         WHERE m.id = $2
+           AND (m.user_id = $1 OR m.partner_id = $1)
+           AND m.status IN ('active', 'waiting')
+         LIMIT 1`,
+        [userId, missionId]
+      );
+    }
 
     const mission = missionRes.rows[0];
 

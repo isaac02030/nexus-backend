@@ -131,7 +131,7 @@ function callOpenAI(prompt) {
             return reject(new Error('A OpenAI nao devolveu texto.'));
           }
 
-          resolve(text);
+          resolve({ text, model });
         } catch (err) {
           reject(err);
         }
@@ -161,11 +161,11 @@ async function buildHealthPayload(live = false) {
 
   if (!live || !configured) return payload;
 
-  const answer = await callOpenAI('Responde so com: online');
+  const result = await callOpenAI('Responde so com: online');
   return {
     ...payload,
     live: true,
-    assistant_reply: answer
+    assistant_reply: result.text
   };
 }
 
@@ -228,9 +228,13 @@ router.post('/mission', auth, async (req, res) => {
     );
 
     const prompt = buildMissionContext(mission, checkinsRes.rows, question);
-    const answer = await callOpenAI(prompt);
+    const result = await callOpenAI(prompt);
 
-    res.json({ answer });
+    res.json({
+      answer: result.text,
+      source: 'openai',
+      model: result.model
+    });
   } catch (err) {
     console.error('Assistant error:', err.message);
     res.status(500).json({

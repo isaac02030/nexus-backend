@@ -65,11 +65,30 @@ function extractResponseText(payload) {
 function callOpenAI(prompt) {
   return new Promise((resolve, reject) => {
     const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL || 'gpt-5.4-mini';
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
     const body = JSON.stringify({
       model,
-      input: prompt,
+      input: [
+        {
+          role: 'system',
+          content: [
+            {
+              type: 'input_text',
+              text: 'Tu es o Grande Irmao do Nexus. Responde com firmeza, clareza e sem entusiasmo falso.'
+            }
+          ]
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text: prompt
+            }
+          ]
+        }
+      ],
       max_output_tokens: 220
     });
 
@@ -154,7 +173,11 @@ router.post('/mission', auth, async (req, res) => {
     res.json({ answer });
   } catch (err) {
     console.error('Assistant error:', err.message);
-    res.status(500).json({ error: 'assistant_failed', message: 'Nao foi possivel gerar resposta agora.' });
+    res.status(500).json({
+      error: 'assistant_failed',
+      message: 'Nao foi possivel gerar resposta agora.',
+      details: err.message
+    });
   }
 });
 

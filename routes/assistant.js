@@ -5,6 +5,17 @@ const auth = require('../middleware/auth');
 
 const router = express.Router();
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
+const DEFAULT_ASSISTANT_MODEL = 'gpt-4o-mini';
+
+function resolveAssistantModel() {
+  const rawModel = (process.env.OPENAI_MODEL || '').trim();
+  if (!rawModel) return DEFAULT_ASSISTANT_MODEL;
+
+  const allowedPrefixes = ['gpt-4o', 'gpt-4.1'];
+  return allowedPrefixes.some(prefix => rawModel.startsWith(prefix))
+    ? rawModel
+    : DEFAULT_ASSISTANT_MODEL;
+}
 
 function buildMissionContext(mission, checkins, question) {
   const recentNotes = checkins
@@ -56,8 +67,12 @@ function extractResponseText(payload) {
 
   return payload.output
     .flatMap(item => Array.isArray(item.content) ? item.content : [])
-    .filter(item => item.type === 'output_text' && item.text)
-    .map(item => item.text)
+    .map(item => {
+      if (item.type === 'output_text' && item.text) return item.text;
+      if (item.type === 'text' && item.text?.value) return item.text.value;
+      return '';
+    })
+    .filter(Boolean)
     .join('\n')
     .trim();
 }
@@ -65,7 +80,7 @@ function extractResponseText(payload) {
 function callOpenAI(prompt) {
   return new Promise((resolve, reject) => {
     const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const model = resolveAssistantModel();
 
     const body = JSON.stringify({
       model,
@@ -123,11 +138,56 @@ function callOpenAI(prompt) {
       });
     });
 
+    req.setTimeout(20000, () => {
+      req.destroy(new Error('Timeout ao chamar a OpenAI.'));
+    });
     req.on('error', reject);
     req.write(body);
     req.end();
   });
 }
+
+async function buildHealthPayload(live = false) {
+  const configured = Boolean(process.env.OPENAI_API_KEY);
+  const modelRequested = (process.env.OPENAI_MODEL || '').trim() || null;
+  const modelResolved = resolveAssistantModel();
+
+  const payload = {
+    configured,
+    model_requested: modelRequested,
+    model_resolved: modelResolved,
+    using_default_model: modelResolved === DEFAULT_ASSISTANT_MODEL && modelRequested !== DEFAULT_ASSISTANT_MODEL
+  };
+
+  if (!live || !configured) return payload;
+
+  const answer = await callOpenAI('Responde so com: online');
+  return {
+    ...payload,
+    live: true,
+    assistant_reply: answer
+  };
+}
+
+router.get('/health', auth, async (req, res) => {
+  if (req.user.userId !== 1) {
+    return res.status(403).json({ error: 'Nao autorizado.' });
+  }
+
+  try {
+    const live = String(req.query.live || '') === '1';
+    const payload = await buildHealthPayload(live);
+    res.json(payload);
+  } catch (err) {
+    res.status(500).json({
+      configured: Boolean(process.env.OPENAI_API_KEY),
+      model_requested: (process.env.OPENAI_MODEL || '').trim() || null,
+      model_resolved: resolveAssistantModel(),
+      live: true,
+      error: err.message
+    });
+  }
+});
 
 router.post('/mission', auth, async (req, res) => {
   const userId = req.user.userId;

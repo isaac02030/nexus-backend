@@ -12,6 +12,13 @@ const router   = express.Router();
 // Ligação à base de dados
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
+async function ensureUserProfileColumns() {
+  await db.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS avatar_url TEXT
+  `);
+}
+
 // ============================================
 // REGISTO
 // POST /api/users/register
@@ -29,13 +36,15 @@ router.post('/register', async (req, res) => {
   }
 
   try {
+    await ensureUserProfileColumns();
+
     // Encriptar a password (nunca guardamos em texto simples)
     const hash = await bcrypt.hash(password, 10);
 
     const result = await db.query(
       `INSERT INTO users (username, email, password)
        VALUES ($1, $2, $3)
-       RETURNING id, username, email, created_at`,
+       RETURNING id, username, email, bio, avatar_url, created_at, updated_at`,
       [username, email, hash]
     );
 
@@ -72,6 +81,8 @@ router.post('/login', async (req, res) => {
   }
 
   try {
+    await ensureUserProfileColumns();
+
     // Procurar o utilizador pelo email
     const result = await db.query(
       'SELECT * FROM users WHERE email = $1',
@@ -115,8 +126,10 @@ const auth = require('../middleware/auth');
 
 router.get('/me', auth, async (req, res) => {
   try {
+    await ensureUserProfileColumns();
+
     const result = await db.query(
-      `SELECT id, username, email, bio, created_at, updated_at
+      `SELECT id, username, email, bio, avatar_url, created_at, updated_at
        FROM users
        WHERE id = $1`,
       [req.user.userId]
@@ -134,7 +147,7 @@ router.get('/me', auth, async (req, res) => {
 });
 
 router.put('/profile', auth, async (req, res) => {
-  const { username, bio } = req.body;
+  const { username, bio, avatar_url } = req.body;
   const userId = req.user.userId;
 
   if (!username?.trim()) {
@@ -143,6 +156,7 @@ router.put('/profile', auth, async (req, res) => {
 
   try {
     // Verificar se username já está em uso por outro utilizador
+    await ensureUserProfileColumns();
     const existing = await db.query(
       'SELECT id FROM users WHERE username = $1 AND id != $2',
       [username.trim(), userId]
@@ -151,11 +165,16 @@ router.put('/profile', auth, async (req, res) => {
       return res.status(400).json({ error: 'Este username já está em uso.' });
     }
 
+    const safeAvatarUrl = avatar_url?.trim() || null;
+    if (safeAvatarUrl && !/^https?:\/\//i.test(safeAvatarUrl)) {
+      return res.status(400).json({ error: 'A foto precisa ser um link http ou https.' });
+    }
+
     const result = await db.query(
-      `UPDATE users SET username = $1, bio = $2, updated_at = NOW()
-       WHERE id = $3
-       RETURNING id, username, email, bio, created_at, updated_at`,
-      [username.trim(), bio?.trim() || null, userId]
+      `UPDATE users SET username = $1, bio = $2, avatar_url = $3, updated_at = NOW()
+       WHERE id = $4
+       RETURNING id, username, email, bio, avatar_url, created_at, updated_at`,
+      [username.trim(), bio?.trim() || null, safeAvatarUrl, userId]
     );
 
     const user = result.rows[0];

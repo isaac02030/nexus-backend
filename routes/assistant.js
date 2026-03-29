@@ -22,7 +22,7 @@ function buildMissionContext(mission, checkins, question) {
     .filter(item => item.completed && item.note && item.note.trim())
     .sort((a, b) => b.day_number - a.day_number)
     .slice(0, 5)
-    .map(item => `Dia ${item.day_number}: ${item.note}`)
+    .map(item => `Dia ${item.day_number}: ${String(item.note).slice(0, 280)}`)
     .join('\n');
 
   return `
@@ -200,6 +200,9 @@ router.post('/mission', auth, async (req, res) => {
 
   if (!missionId || !question) {
     return res.status(400).json({ error: 'mission_id e question sao obrigatorios.' });
+  }
+  if (question.length > 500) {
+    return res.status(400).json({ error: 'A pergunta ficou longa demais.' });
   }
 
   try {

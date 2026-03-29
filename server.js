@@ -9,14 +9,33 @@ require('dotenv').config();
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+const ALLOWED_ORIGINS = new Set([
+  'https://isaac02030.github.io',
+  'http://localhost:3000',
+  'http://localhost:4173',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:4173',
+  'http://127.0.0.1:5173',
+  'http://localhost:5500',
+  'http://127.0.0.1:5500'
+]);
 
 // ============================================
 // MIDDLEWARES
 // São funções que correm em cada pedido
 // antes de chegar à rota final
 // ============================================
-app.use(cors());               // Permite que o frontend aceda ao backend
-app.use(express.json());       // Traduz JSON dos pedidos automaticamente
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || ALLOWED_ORIGINS.has(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Origem nao autorizada pelo CORS.'));
+  },
+  credentials: false
+}));
+app.use(express.json({ limit: '1mb' }));       // Traduz JSON dos pedidos automaticamente
 
 // ============================================
 // ROTAS

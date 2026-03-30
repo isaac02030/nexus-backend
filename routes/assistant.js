@@ -61,6 +61,80 @@ Formato da resposta:
 `;
 }
 
+function getLastCompletedNote(checkins) {
+  return checkins.find(item => item.completed && item.note && item.note.trim());
+}
+
+function buildLocalAssistantFallback(mission, checkins, question) {
+  const q = String(question || '').toLowerCase();
+  const minimum = mission.daily_minimum || 'o minimo combinado';
+  const fallback = mission.fallback_plan || 'faz a versao minima e volta amanha sem negociar.';
+  const why = mission.why_it_matters || 'ha uma palavra tua para proteger.';
+  const lastNote = getLastCompletedNote(checkins);
+
+  if (mission.category === 'aprendizagem') {
+    const focus = mission.study_focus || mission.title;
+    const stage = mission.study_current_stage || 'base';
+    const target = mission.study_target_outcome || 'fechar um bloco concreto em 30 dias';
+
+    if (q.includes('3 dias') || q.includes('tres dias') || q.includes('plano')) {
+      return [
+        `Hoje: fecha ${minimum} em ${focus}, focando em ${stage}.`,
+        `A entrega de hoje e uma nota curta com o que entendeste e o que ainda ficou confuso.`,
+        `Amanha: revisa o que assentou hoje e avanca um passo em direcao a ${target}.`
+      ].join(' ');
+    }
+
+    if (q.includes('nota')) {
+      return 'Escreve a nota em tres partes: o que estudaste, o que ficou claro e o que ainda precisas rever amanha.';
+    }
+
+    if (q.includes('perdido') || q.includes('trav')) {
+      return `Nao tenta resolver a missao inteira agora. Hoje fecha so ${minimum} em ${focus}, a partir de ${stage}. No fim, deixa uma nota curta.`;
+    }
+
+    return `Hoje fecha ${minimum} em ${focus}, comecando por ${stage}. No fim, escreve uma nota curta e usa isso para decidir o passo de amanha.`;
+  }
+
+  if (mission.category === 'fitness') {
+    if (q.includes('prova')) {
+      return 'Faz o treino combinado e registra uma prova curta: tipo de treino, duracao ou distancia, e uma nota objetiva do que foi feito.';
+    }
+
+    if (q.includes('3 dias') || q.includes('tres dias') || q.includes('plano')) {
+      return [
+        `Hoje: fecha ${minimum} e registra a prova.`,
+        'Amanha: repete o minimo ou faz uma versao mais leve se o corpo pedir ajuste.',
+        'No terceiro dia: volta ao ritmo normal sem quebrar a janela combinada.'
+      ].join(' ');
+    }
+
+    if (q.includes('sem vontade') || q.includes('trav')) {
+      return `Nao negocia a presenca. Se o dia estiver pesado, faz a versao minima de ${minimum} e registra a prova mesmo assim.`;
+    }
+
+    return `Hoje o foco e simples: fecha ${minimum} dentro da janela combinada e registra uma prova curta do treino.`;
+  }
+
+  if (mission.category === 'criatividade') {
+    return `Hoje nao tenta produzir algo perfeito. Fecha ${minimum}, gera uma saida concreta e registra o que saiu. Se travares, reduz a escala, nao a presenca.`;
+  }
+
+  if (mission.category === 'habito') {
+    return `Hoje protege o padrao. Fecha ${minimum} na janela combinada. Se falhares, responde com isto: ${fallback}`;
+  }
+
+  if (q.includes('por que') || q.includes('porque')) {
+    return `Isto importa por uma razao simples: ${why}`;
+  }
+
+  if (lastNote) {
+    return `O ultimo registro util foi no dia ${lastNote.day_number}. Usa isso como ponto de partida e fecha hoje ${minimum}.`;
+  }
+
+  return `Hoje fecha ${minimum}. Se travar, nao improvisa: ${fallback}`;
+}
+
 function extractResponseText(payload) {
   if (payload.output_text) return payload.output_text.trim();
   if (!Array.isArray(payload.output)) return '';
@@ -194,10 +268,6 @@ router.post('/mission', auth, async (req, res) => {
   const missionId = Number(req.body.mission_id);
   const question = (req.body.question || '').trim();
 
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(503).json({ error: 'assistant_unavailable', message: 'Assistente IA ainda nao configurado.' });
-  }
-
   if (!missionId || !question) {
     return res.status(400).json({ error: 'mission_id e question sao obrigatorios.' });
   }
@@ -231,13 +301,32 @@ router.post('/mission', auth, async (req, res) => {
     );
 
     const prompt = buildMissionContext(mission, checkinsRes.rows, question);
-    const result = await callOpenAI(prompt);
 
-    res.json({
-      answer: result.text,
-      source: 'openai',
-      model: result.model
-    });
+    if (!process.env.OPENAI_API_KEY) {
+      return res.json({
+        answer: buildLocalAssistantFallback(mission, checkinsRes.rows, question),
+        source: 'fallback',
+        model: null,
+        fallback_reason: 'missing_api_key'
+      });
+    }
+
+    try {
+      const result = await callOpenAI(prompt);
+      return res.json({
+        answer: result.text,
+        source: 'openai',
+        model: result.model
+      });
+    } catch (openAiErr) {
+      console.error('Assistant OpenAI error:', openAiErr.message);
+      return res.json({
+        answer: buildLocalAssistantFallback(mission, checkinsRes.rows, question),
+        source: 'fallback',
+        model: null,
+        fallback_reason: openAiErr.message
+      });
+    }
   } catch (err) {
     console.error('Assistant error:', err.message);
     res.status(500).json({

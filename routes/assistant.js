@@ -316,7 +316,8 @@ router.post('/mission', auth, async (req, res) => {
       return res.json({
         answer: result.text,
         source: 'openai',
-        model: result.model
+        model: result.model,
+        fallback_reason: null
       });
     } catch (openAiErr) {
       console.error('Assistant OpenAI error:', openAiErr.message);

@@ -309,7 +309,22 @@ router.post('/:id/abandon', auth, async (req, res) => {
     }
 
     if (!mission.partner_id || mission.mode === 'solo') {
-      return res.status(400).json({ error: 'Esta acao so existe para missoes emparelhadas.' });
+      if (mission.user_id !== userId) {
+        return res.status(403).json({ error: 'Nao autorizado para encerrar esta missao.' });
+      }
+
+      await db.query(
+        `UPDATE missions
+         SET status = 'abandoned',
+             ends_at = NOW()
+         WHERE id = $1`,
+        [missionId]
+      );
+
+      return res.json({
+        success: true,
+        message: 'Missao solo encerrada.'
+      });
     }
 
     if (mission.partner_id === userId) {

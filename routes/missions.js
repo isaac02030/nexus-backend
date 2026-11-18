@@ -11,6 +11,12 @@ const router = express.Router();
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 let missionContractReady = false;
 let missionParticipantHealingReady = false;
+let missionMatchSchemaReady = false;
+
+// Auto-matching stays off unless the environment explicitly sets MATCHING_ENABLED=true.
+function isMatchingEnabled() {
+  return String(process.env.MATCHING_ENABLED || '').toLowerCase() === 'true';
+}
 
 function missionParticipantWhere(alias = 'm', userParam = '$1') {
   return `(
@@ -41,10 +47,33 @@ async function ensureMissionContractColumns() {
       ADD COLUMN IF NOT EXISTS proof_mode VARCHAR(40),
       ADD COLUMN IF NOT EXISTS study_focus VARCHAR(160),
       ADD COLUMN IF NOT EXISTS study_current_stage VARCHAR(160),
-      ADD COLUMN IF NOT EXISTS study_target_outcome TEXT
+      ADD COLUMN IF NOT EXISTS study_target_outcome TEXT,
+      ADD COLUMN IF NOT EXISTS match_preference VARCHAR(20),
+      ADD COLUMN IF NOT EXISTS partner_started_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS pair_started_at TIMESTAMP
   `);
 
   missionContractReady = true;
+}
+
+async function ensureMissionMatchSchema() {
+  if (missionMatchSchemaReady) return;
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS mission_matches (
+      id SERIAL PRIMARY KEY,
+      mission_a_id INTEGER NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+      mission_b_id INTEGER NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+      mode VARCHAR(20) NOT NULL CHECK (mode IN ('parceiro', 'rival')),
+      status VARCHAR(20) NOT NULL DEFAULT 'active',
+      started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      ended_at TIMESTAMP,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      CHECK (mission_a_id <> mission_b_id)
+    )
+  `);
+
+  missionMatchSchemaReady = true;
 }
 
 async function healPairedMissionParticipants() {
@@ -94,6 +123,67 @@ async function healWaitingSoloMissions() {
     WHERE mode = 'solo'
       AND status = 'waiting'
   `);
+
+  await db.query(`
+    UPDATE missions
+    SET match_preference = COALESCE(match_preference, mode),
+        mode = 'solo',
+        status = 'active',
+        started_at = COALESCE(started_at, created_at, NOW()),
+        ends_at = COALESCE(ends_at, COALESCE(started_at, created_at, NOW()) + INTERVAL '30 days')
+    WHERE status = 'waiting'
+      AND mode IN ('parceiro', 'rival')
+      AND partner_id IS NULL
+  `);
+}
+
+async function endLinkedMissionMatch(missionId, userId, { abandon = false } = {}) {
+  await ensureMissionMatchSchema();
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const pairRes = await client.query(
+      `SELECT mm.*, ma.user_id AS user_a, mb.user_id AS user_b,
+              ma.id AS mission_a, mb.id AS mission_b
+       FROM mission_matches mm
+       JOIN missions ma ON ma.id = mm.mission_a_id
+       JOIN missions mb ON mb.id = mm.mission_b_id
+       WHERE mm.status = 'active'
+         AND (mm.mission_a_id = $1 OR mm.mission_b_id = $1)
+         AND (ma.user_id = $2 OR mb.user_id = $2)
+       LIMIT 1
+       FOR UPDATE OF mm`,
+      [missionId, userId]
+    );
+    const pair = pairRes.rows[0];
+    if (!pair) {
+      await client.query('COMMIT');
+      return false;
+    }
+
+    const isMissionAOwner = Number(pair.user_a) === Number(userId);
+    const ownedMissionId = isMissionAOwner ? pair.mission_a : pair.mission_b;
+    const counterpartMissionId = isMissionAOwner ? pair.mission_b : pair.mission_a;
+    await client.query(
+      `UPDATE missions
+       SET mode = 'solo', partner_id = NULL, match_preference = NULL, pair_started_at = NULL,
+           status = CASE WHEN id = $1 AND $3 THEN 'abandoned' ELSE status END,
+           ends_at = CASE WHEN id = $1 AND $3 THEN NOW() ELSE ends_at END
+       WHERE id IN ($1, $2)`,
+      [ownedMissionId, counterpartMissionId, abandon]
+    );
+    await client.query(
+      `UPDATE mission_matches SET status = 'ended', ended_at = NOW() WHERE id = $1`,
+      [pair.id]
+    );
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 router.post('/', auth, async (req, res) => {
@@ -120,23 +210,25 @@ router.post('/', auth, async (req, res) => {
 
   try {
     await ensureMissionContractColumns();
+    await ensureMissionMatchSchema();
     await healPairedMissionParticipants();
     await healWaitingSoloMissions();
 
+    const requestedMode = ['parceiro', 'rival'].includes(mode) ? mode : 'solo';
     const result = await db.query(
       `INSERT INTO missions (
-         user_id, title, category, level, mode, description,
+         user_id, title, category, level, mode, match_preference, description,
          daily_minimum, commitment_window, why_it_matters, fallback_plan, proof_mode,
          study_focus, study_current_stage, study_target_outcome
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       VALUES ($1, $2, $3, $4, 'solo', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [
         userId,
         title,
         category,
         level || 'iniciante',
-        mode || 'solo',
+        requestedMode === 'solo' ? null : requestedMode,
         description || null,
         daily_minimum || null,
         commitment_window || null,
@@ -149,48 +241,33 @@ router.post('/', auth, async (req, res) => {
       ]
     );
 
-    const mission = result.rows[0];
+    const now = new Date();
+    const endsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const activated = await db.query(
+      `UPDATE missions
+       SET status = 'active', started_at = $1, ends_at = $2
+       WHERE id = $3
+       RETURNING *`,
+      [now, endsAt, result.rows[0].id]
+    );
 
-    if (mission.mode === 'solo') {
-      const now = new Date();
-      const endsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    let mission = activated.rows[0];
+    const matchingEnabled = isMatchingEnabled();
+    const match = matchingEnabled && mission.match_preference
+      ? await tryMatchMission(mission, userId, db)
+      : null;
+    if (match) mission = match.currentMission;
 
-      const activated = await db.query(
-        `UPDATE missions
-         SET status = 'active',
-             started_at = $1,
-             ends_at = $2
-         WHERE id = $3
-         RETURNING *`,
-        [now, endsAt, mission.id]
-      );
-
-      return res.status(201).json({
-        mission: activated.rows[0],
-        matched: false,
-        message: 'Missao solo criada.'
-      });
-    }
-
-    if (mode === 'parceiro' || mode === 'rival') {
-      const match = await findMatch(mission, userId, db);
-      if (match) {
-        await activateMission(mission.id, match, db);
-        return res.status(201).json({
-          mission,
-          matched: true,
-          matchedWith: match.user_id,
-          message: 'Match encontrado! A missao comeca agora.'
-        });
-      }
-    }
-
-    res.status(201).json({
+    return res.status(201).json({
       mission,
-      matched: false,
-      message: mode === 'solo'
-        ? 'Missao solo criada.'
-        : 'Entraste na fila da tua categoria. Vais ser avisado quando aparecer alguem compativel.'
+      matched: !!match,
+      matchedWith: match ? match.partnerMission.user_id : null,
+      matchingEnabled,
+      message: match
+        ? 'Par encontrado. A tua missão continua com o progresso atual.'
+        : matchingEnabled && mission.match_preference
+          ? 'A missão começou em solo. Vamos procurar alguém compatível enquanto segues.'
+          : 'Missao solo criada.'
     });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao criar missao.' });
@@ -228,40 +305,95 @@ router.get('/:id', auth, async (req, res) => {
 router.get('/', auth, async (req, res) => {
   try {
     await ensureMissionContractColumns();
+    await ensureMissionMatchSchema();
     await healPairedMissionParticipants();
     await healWaitingSoloMissions();
 
     const result = await db.query(
       `SELECT m.*,
-        CASE WHEN m.user_id = $1
-          THEN u2.username
-          ELSE u1.username
-        END AS partner_name,
-        CASE WHEN m.user_id = $1
-          THEN m.partner_id
-          ELSE m.user_id
-        END AS counterpart_user_id,
+        u2.username AS partner_name,
+        COALESCE(counterpart.user_id, m.partner_id) AS counterpart_user_id,
+        counterpart.id AS partner_mission_id,
+        pair.started_at AS match_started_at,
+        COALESCE(counterpart.started_at, m.partner_started_at, m.started_at) AS partner_started_at,
+        CASE WHEN pair.id IS NOT NULL THEN (
+          SELECT COUNT(*) FROM checkins own_checkin
+          WHERE own_checkin.mission_id = m.id
+            AND own_checkin.user_id = m.user_id
+            AND own_checkin.completed = true
+            AND own_checkin.created_at >= pair.started_at
+        ) ELSE m.user_score END AS user_score,
+        CASE WHEN pair.id IS NOT NULL THEN (
+          SELECT COUNT(*) FROM checkins partner_checkin
+          WHERE partner_checkin.mission_id = counterpart.id
+            AND partner_checkin.user_id = counterpart.user_id
+            AND partner_checkin.completed = true
+            AND partner_checkin.created_at >= pair.started_at
+        ) ELSE m.partner_score END AS partner_score,
         (
           SELECT MAX(c.day_number)
           FROM checkins c
-          WHERE c.mission_id = m.id
+          WHERE c.mission_id = COALESCE(counterpart.id, m.id)
             AND c.completed = true
-            AND c.user_id = CASE
-              WHEN m.user_id = $1 THEN m.partner_id
-              ELSE m.user_id
-            END
-       ) AS partner_last_checkin_day
+            AND c.user_id = COALESCE(counterpart.user_id, m.partner_id)
+       ) AS partner_last_checkin_day,
+       (SELECT MAX(c.created_at)
+        FROM checkins c
+        WHERE c.mission_id = COALESCE(counterpart.id, m.id)
+          AND c.user_id = COALESCE(counterpart.user_id, m.partner_id)
+          AND c.completed = true) AS partner_last_checkin_at
        FROM missions m
+       LEFT JOIN mission_matches pair
+         ON pair.status = 'active' AND (pair.mission_a_id = m.id OR pair.mission_b_id = m.id)
+       LEFT JOIN missions counterpart
+         ON counterpart.id = CASE
+           WHEN pair.mission_a_id = m.id THEN pair.mission_b_id
+           WHEN pair.mission_b_id = m.id THEN pair.mission_a_id
+           ELSE NULL
+         END
        LEFT JOIN users u1 ON m.user_id = u1.id
-       LEFT JOIN users u2 ON m.partner_id = u2.id
-       WHERE ${missionParticipantWhere('m', '$1')}
+       LEFT JOIN users u2 ON u2.id = COALESCE(counterpart.user_id, m.partner_id)
+       WHERE (
+         m.user_id = $1
+         OR (m.partner_id = $1 AND pair.id IS NULL)
+         OR EXISTS (SELECT 1 FROM checkins c WHERE c.mission_id = m.id AND c.user_id = $1)
+         OR EXISTS (SELECT 1 FROM messages msg WHERE msg.mission_id = m.id AND msg.sender_id = $1)
+       ) AND m.status <> 'merged'
        ORDER BY m.created_at DESC`,
       [req.user.userId]
     );
 
-    res.json(result.rows);
+    res.json(result.rows.map(mission => ({
+      ...mission,
+      matching_enabled: isMatchingEnabled()
+    })));
   } catch (err) {
     res.status(500).json({ error: 'Erro ao listar missoes.' });
+  }
+});
+
+router.post('/:id/match', auth, async (req, res) => {
+  try {
+    await ensureMissionContractColumns();
+    await ensureMissionMatchSchema();
+    const missionRes = await db.query(
+      `SELECT * FROM missions
+       WHERE id = $1 AND user_id = $2 AND status = 'active'
+       LIMIT 1`,
+      [req.params.id, req.user.userId]
+    );
+    const mission = missionRes.rows[0];
+    if (!mission) return res.status(404).json({ error: 'Missão ativa não encontrada.' });
+    if (!isMatchingEnabled()) {
+      return res.json({ matched: false, matchingEnabled: false, mission });
+    }
+    if (!mission.match_preference) return res.json({ matched: false, mission });
+
+    const match = await tryMatchMission(mission, req.user.userId, db);
+    if (!match) return res.json({ matched: false, mission });
+    res.json({ matched: true, matchingEnabled: true, mission: match.currentMission, matchedWith: match.partnerMission.user_id });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao procurar um par compatível.' });
   }
 });
 
@@ -306,6 +438,10 @@ router.post('/:id/abandon', auth, async (req, res) => {
 
     if (!mission) {
       return res.status(404).json({ error: 'Missao ativa nao encontrada.' });
+    }
+
+    if (await endLinkedMissionMatch(missionId, userId, { abandon: true })) {
+      return res.json({ success: true, message: 'Saíste da missão. A outra pessoa continua em solo.' });
     }
 
     if (!mission.partner_id || mission.mode === 'solo') {
@@ -376,6 +512,13 @@ router.post('/:id/continue-solo', auth, async (req, res) => {
       return res.status(404).json({ error: 'Missao ativa nao encontrada.' });
     }
 
+    if (await endLinkedMissionMatch(missionId, userId)) {
+      return res.json({
+        success: true,
+        message: 'A missão agora continua em solo, sem perder o teu progresso.'
+      });
+    }
+
     if (!mission.partner_id || mission.mode === 'solo') {
       return res.status(400).json({ error: 'Esta missao ja esta em solo.' });
     }
@@ -408,39 +551,103 @@ router.post('/:id/continue-solo', auth, async (req, res) => {
   }
 });
 
-async function findMatch(newMission, currentUserId, db) {
-  const exact = await db.query(
-    `SELECT * FROM missions
-     WHERE status = 'waiting'
-       AND mode = $1
-       AND category = $2
-       AND user_id != $3
-     ORDER BY created_at ASC
-     LIMIT 1`,
-    [newMission.mode, newMission.category, currentUserId]
-  );
-
-  return exact.rows[0] || null;
+function missionLevelRank(level) {
+  const normalized = String(level || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (normalized === 'iniciante') return 1;
+  if (normalized === 'intermedio' || normalized === 'intermediario') return 2;
+  if (normalized === 'avancado') return 3;
+  return null;
 }
 
-async function activateMission(newMissionId, matchedMission, db) {
-  const now = new Date();
-  const endsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+async function tryMatchMission(currentMission, currentUserId, pool) {
+  const requestedMode = currentMission.match_preference;
+  const currentRank = missionLevelRank(currentMission.level);
+  if (!['parceiro', 'rival'].includes(requestedMode) || !currentRank) return null;
 
-  await db.query(
-    `UPDATE missions
-     SET status = 'active',
-         partner_id = $1,
-         started_at = $2,
-         ends_at = $3
-     WHERE id = $4`,
-    [matchedMission.user_id, now, endsAt, newMissionId]
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const lockedCurrentRes = await client.query(
+      `SELECT * FROM missions
+       WHERE id = $1 AND user_id = $2 AND status = 'active'
+         AND mode = 'solo' AND partner_id IS NULL
+       FOR UPDATE`,
+      [currentMission.id, currentUserId]
+    );
+    const lockedCurrent = lockedCurrentRes.rows[0];
+    if (!lockedCurrent || lockedCurrent.match_preference !== requestedMode) {
+      await client.query('COMMIT');
+      return null;
+    }
 
-  await db.query(
-    `DELETE FROM missions WHERE id = $1`,
-    [matchedMission.id]
-  );
+    const candidateRes = await client.query(
+      `SELECT m.*
+       FROM missions m
+       WHERE m.status = 'active'
+         AND m.mode = 'solo'
+         AND m.match_preference = $1
+         AND LOWER(BTRIM(m.category)) = LOWER(BTRIM($2))
+         AND m.user_id <> $3
+         AND m.partner_id IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM mission_matches mm
+           WHERE mm.status = 'active'
+             AND (mm.mission_a_id = m.id OR mm.mission_b_id = m.id)
+         )
+         AND CASE
+           WHEN LOWER(TRANSLATE(BTRIM(m.level), 'íéâãá', 'ieaaa')) = 'iniciante' THEN 1
+           WHEN LOWER(TRANSLATE(BTRIM(m.level), 'íéâãá', 'ieaaa')) IN ('intermedio', 'intermediario') THEN 2
+           WHEN LOWER(TRANSLATE(BTRIM(m.level), 'íéâãá', 'ieaaa')) = 'avancado' THEN 3
+           ELSE NULL
+         END BETWEEN GREATEST(1, $4 - 1) AND LEAST(3, $4 + 1)
+       ORDER BY CASE
+           WHEN CASE
+             WHEN LOWER(TRANSLATE(BTRIM(m.level), 'íéâãá', 'ieaaa')) = 'iniciante' THEN 1
+             WHEN LOWER(TRANSLATE(BTRIM(m.level), 'íéâãá', 'ieaaa')) IN ('intermedio', 'intermediario') THEN 2
+             WHEN LOWER(TRANSLATE(BTRIM(m.level), 'íéâãá', 'ieaaa')) = 'avancado' THEN 3
+             ELSE NULL
+           END = $4 THEN 0 ELSE 1 END,
+         m.created_at ASC
+       LIMIT 1
+       FOR UPDATE OF m SKIP LOCKED`,
+      [requestedMode, lockedCurrent.category, currentUserId, currentRank]
+    );
+    const candidate = candidateRes.rows[0];
+    if (!candidate) {
+      await client.query('COMMIT');
+      return null;
+    }
+
+    const now = new Date();
+    await client.query(
+      `INSERT INTO mission_matches (mission_a_id, mission_b_id, mode, started_at)
+       VALUES ($1, $2, $3, $4)`,
+      [lockedCurrent.id, candidate.id, requestedMode, now]
+    );
+    await client.query(
+      `UPDATE missions
+       SET mode = $1, partner_id = $2, pair_started_at = $3
+       WHERE id = $4`,
+      [requestedMode, candidate.user_id, now, lockedCurrent.id]
+    );
+    await client.query(
+      `UPDATE missions
+       SET mode = $1, partner_id = $2, pair_started_at = $3
+       WHERE id = $4`,
+      [requestedMode, currentUserId, now, candidate.id]
+    );
+    await client.query('COMMIT');
+
+    return {
+      currentMission: { ...lockedCurrent, mode: requestedMode, partner_id: candidate.user_id, pair_started_at: now },
+      partnerMission: candidate
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 module.exports = router;

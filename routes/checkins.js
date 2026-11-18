@@ -145,7 +145,7 @@ router.post('/', auth, async (req, res) => {
       await updateScore(mission, userId, db);
     }
 
-    await checkMissionCompletion(mission, db);
+    await checkMissionCompletion(mission, userId, db);
 
     res.status(201).json({
       checkin: checkinRes.rows[0],
@@ -161,12 +161,34 @@ router.post('/', auth, async (req, res) => {
 
 router.get('/:missionId', auth, async (req, res) => {
   try {
+    const missionRes = await db.query(
+      `SELECT * FROM missions m
+       WHERE m.id = $1 AND ${missionParticipantWhere('m', '$2')}`,
+      [req.params.missionId, req.user.userId]
+    );
+    if (!missionRes.rows[0]) return res.status(404).json({ error: 'Missão não encontrada.' });
+
+    const pairRes = await db.query(
+      `SELECT mission_a_id, mission_b_id
+       FROM mission_matches
+       WHERE status = 'active' AND (mission_a_id = $1 OR mission_b_id = $1)
+       LIMIT 1`,
+      [req.params.missionId]
+    );
+    const pair = pairRes.rows[0];
+    const missionIds = [Number(req.params.missionId)];
+    if (pair) {
+      missionIds.push(Number(pair.mission_a_id) === Number(req.params.missionId)
+        ? Number(pair.mission_b_id)
+        : Number(pair.mission_a_id));
+    }
+
     const result = await db.query(
       `SELECT c.*, u.username FROM checkins c
        JOIN users u ON c.user_id = u.id
-       WHERE c.mission_id = $1
-       ORDER BY c.day_number ASC`,
-      [req.params.missionId]
+       WHERE c.mission_id = ANY($1::int[])
+       ORDER BY c.created_at ASC, c.id ASC`,
+      [missionIds]
     );
 
     const byUser = result.rows.reduce((acc, row) => {
@@ -195,18 +217,39 @@ router.get('/:missionId/score', auth, async (req, res) => {
     const mission = missionRes.rows[0];
     if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
 
-    // Contar direto da tabela checkins (mais fiável)
-    const scoresRes = await db.query(
-      `SELECT user_id, COUNT(*) as days_completed
-       FROM checkins WHERE mission_id = $1 AND completed = true
-       GROUP BY user_id`,
+    const pairRes = await db.query(
+      `SELECT mission_a_id, mission_b_id, started_at
+       FROM mission_matches
+       WHERE status = 'active' AND (mission_a_id = $1 OR mission_b_id = $1)
+       LIMIT 1`,
       [req.params.missionId]
     );
-
-    const scores = scoresRes.rows.reduce((acc, row) => {
-      acc[row.user_id] = parseInt(row.days_completed);
-      return acc;
-    }, {});
+    const pair = pairRes.rows[0];
+    const partnerMissionId = pair
+      ? Number(pair.mission_a_id) === Number(mission.id)
+        ? pair.mission_b_id
+        : pair.mission_a_id
+      : mission.id;
+    const scoresRes = await db.query(
+      `SELECT mission_id, user_id, COUNT(*) AS days_completed
+       FROM checkins
+       WHERE mission_id = ANY($1::int[]) AND completed = true
+         AND ($2::timestamp IS NULL OR created_at >= $2)
+       GROUP BY mission_id, user_id`,
+      [[mission.id, partnerMissionId], pair?.started_at || null]
+    );
+    const ownScore = scoresRes.rows.find(row => Number(row.mission_id) === Number(mission.id)
+      && Number(row.user_id) === Number(mission.user_id));
+    const partnerMissionRes = pair
+      ? await db.query('SELECT user_id FROM missions WHERE id = $1', [partnerMissionId])
+      : null;
+    const partnerUserId = pair ? partnerMissionRes.rows[0]?.user_id : mission.partner_id;
+    const partnerScore = scoresRes.rows.find(row => Number(row.mission_id) === Number(partnerMissionId)
+      && Number(row.user_id) === Number(partnerUserId));
+    const scores = {
+      [mission.user_id]: Number(ownScore?.days_completed || 0),
+      [partnerUserId]: Number(partnerScore?.days_completed || 0)
+    };
 
     // Calcular sequência atual (dias consecutivos a partir do dia de hoje)
     let myStreak = 0;
@@ -359,10 +402,29 @@ router.get('/:missionId/streak', auth, async (req, res) => {
   }
 });
 
-async function checkMissionCompletion(mission, db) {
-  if (!mission.partner_id) return;
+async function checkMissionCompletion(mission, userId, db) {
+  const pairRes = await db.query(
+    `SELECT id FROM mission_matches
+     WHERE status = 'active' AND (mission_a_id = $1 OR mission_b_id = $1)
+     LIMIT 1`,
+    [mission.id]
+  );
+
+  if (pairRes.rows[0] || !mission.partner_id || mission.user_id === userId) {
+    const result = await db.query(
+      `SELECT 1 FROM checkins
+       WHERE mission_id = $1 AND user_id = $2 AND day_number >= $3 AND completed = true
+       LIMIT 1`,
+      [mission.id, userId, mission.duration_days]
+    );
+    if (result.rows[0]) {
+      await db.query(`UPDATE missions SET status = 'completed' WHERE id = $1`, [mission.id]);
+    }
+    return;
+  }
+
   const result = await db.query(
-    `SELECT user_id FROM checkins WHERE mission_id = $1 AND day_number = $2 AND completed = true`,
+    `SELECT user_id FROM checkins WHERE mission_id = $1 AND day_number >= $2 AND completed = true`,
     [mission.id, mission.duration_days]
   );
   const ids = result.rows.map(r => r.user_id);

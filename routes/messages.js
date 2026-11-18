@@ -110,13 +110,29 @@ router.get('/:missionId', auth, async (req, res) => {
       return res.status(403).json({ error: 'Sem acesso a esta missao.' });
     }
 
+    const pairRes = await db.query(
+      `SELECT mission_a_id, mission_b_id
+       FROM mission_matches
+       WHERE status = 'active'
+         AND (mission_a_id = $1 OR mission_b_id = $1)
+       LIMIT 1`,
+      [req.params.missionId]
+    );
+    const pair = pairRes.rows[0];
+    const missionIds = [Number(req.params.missionId)];
+    if (pair) {
+      missionIds.push(Number(pair.mission_a_id) === Number(req.params.missionId)
+        ? Number(pair.mission_b_id)
+        : Number(pair.mission_a_id));
+    }
+
     const result = await db.query(
       `SELECT m.*, u.username AS sender_name
        FROM messages m
        JOIN users u ON m.sender_id = u.id
-       WHERE m.mission_id = $1
+       WHERE m.mission_id = ANY($1::int[])
        ORDER BY m.created_at ASC, m.id ASC`,
-      [req.params.missionId]
+      [missionIds]
     );
 
     res.json({

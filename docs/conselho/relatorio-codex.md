@@ -12,3 +12,16 @@
 
 ## Dúvidas
 - Nenhuma nesta etapa.
+
+## Feito em 18/11/2026 — backup do banco
+
+- Não existe `AGENTS.md` neste repositório. A tarefa seguiu `docs/conselho/decisoes.md`.
+- `.gitignore` para Node: dependências, `.env` e variantes, logs, dumps de backup e arquivos de sistema. `env.example` continua versionado.
+- O `JWT_SECRET` de exemplo deixou de ser um texto aproveitável e passou a ser o placeholder `troque-por-um-segredo-longo-e-aleatorio`.
+- Scripts `npm run db:backup` e `npm run db:restore`, com `pg_dump` / `pg_restore` e `DATABASE_URL` vinda do ambiente. Os dumps ficam em `backups/`, pasta ignorada pelo Git.
+- Guia em português: `docs/backup.md`. Backup automático de produção ficou só documentado, sem implementação.
+- Prova local, num Postgres descartável que depois foi apagado: migração `database.sql`, uma linha fictícia, backup, banco apagado, banco vazio recriado, restauração, e a linha voltou. Uma segunda restauração desfez uma alteração feita depois do backup. O mesmo teste também passou com `DATABASE_URL` no formato `postgresql://usuario:senha@127.0.0.1:5432/banco`. A senha não apareceu na saída. Nada disso foi commitado (nem o dump, nem senha, nem a linha de teste).
+
+## Pendente nesta etapa
+- Backup automático em produção.
+- Nada foi mesclado em `main`. Railway não foi alterado.

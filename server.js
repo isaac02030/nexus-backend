@@ -5,21 +5,13 @@
 
 const express = require('express');
 const cors    = require('cors');
+const { buildAllowedOrigins } = require('./lib/allowed-origins');
 require('dotenv').config();
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
-const ALLOWED_ORIGINS = new Set([
-  'https://isaac02030.github.io',
-  'http://localhost:3000',
-  'http://localhost:4173',
-  'http://localhost:5173',
-  'http://127.0.0.1:3000',
-  'http://127.0.0.1:4173',
-  'http://127.0.0.1:5173',
-  'http://localhost:5500',
-  'http://127.0.0.1:5500'
-]);
+// Fora de producao entra http://localhost:8080. Com NODE_ENV=production, nao.
+const ALLOWED_ORIGINS = buildAllowedOrigins(process.env.NODE_ENV);
 
 // ============================================
 // MIDDLEWARES
@@ -114,8 +106,10 @@ app.use((err, req, res, next) => {
 // ============================================
 // INICIAR O SERVIDOR
 // ============================================
-app.listen(PORT, () => {
-  console.log(`🔥 Nexus API a correr em http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`🔥 Nexus API a correr em http://localhost:${PORT}`);
+  });
+}
 
 module.exports = app;

@@ -53,6 +53,17 @@ function getProofValidation(proofMode, note) {
   return null;
 }
 
+function isDifficultDay(row) {
+  return row.is_difficult === true;
+}
+
+function withDifficultFlag(row) {
+  return {
+    ...row,
+    difficult: isDifficultDay(row)
+  };
+}
+
 function calculateBrio(doneDays, todayDay, streak) {
   const completedDays = doneDays.size;
   const totalDays = Math.max(todayDay, 1);
@@ -173,7 +184,7 @@ router.post('/', auth, async (req, res) => {
     await checkMissionCompletion(mission, userId, db);
 
     res.status(201).json({
-      checkin: checkinRes.rows[0],
+      checkin: withDifficultFlag(checkinRes.rows[0]),
       day: dayNumber,
       already_done: alreadyDone,
       message: alreadyDone ? `Dia ${dayNumber} já estava registado!` : `Dia ${dayNumber} registado! 🔥`
@@ -222,7 +233,7 @@ router.get('/:missionId', auth, async (req, res) => {
         day: row.day_number,
         completed: row.completed,
         note: row.note,
-        difficult: row.is_difficult === true
+        difficult: isDifficultDay(row)
       });
       return acc;
     }, {});
@@ -333,7 +344,7 @@ async function streakSummary(mission, userId) {
     result.rows.filter(row => row.completed === true).map(row => row.day_number)
   );
   const difficultDays = result.rows
-    .filter(row => row.is_difficult === true)
+    .filter(row => isDifficultDay(row))
     .map(row => row.day_number)
     .sort((left, right) => left - right);
 

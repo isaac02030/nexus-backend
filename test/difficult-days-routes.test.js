@@ -303,10 +303,12 @@ test('migration, dias difíceis e sequência no Postgres local', {
   assert.equal(normalPost.json.day, 2);
   assert.equal(normalPost.json.checkin.completed, true);
   assert.equal(normalPost.json.checkin.is_difficult, false);
+  assert.equal(normalPost.json.checkin.difficult, false);
   assert.equal(difficultPost.status, 201);
   assert.equal(difficultPost.json.day, 2);
   assert.equal(difficultPost.json.checkin.completed, true);
   assert.equal(difficultPost.json.checkin.is_difficult, true);
+  assert.equal(difficultPost.json.checkin.difficult, true);
 
   const normalStreak = await getStreak(normalMission);
   const difficultStreak = await getStreak(difficultMission);

@@ -420,6 +420,33 @@ test('migration, dias difíceis e sequência no Postgres local', {
   assert.equal(sharedStreak.json.difficult_days_used, 1);
   assert.equal(sharedStreak.json.difficult_days_remaining, 3);
 
+  const yesterdayOpen = await createMission(2);
+  const yesterdayOpenStreak = await getStreak(yesterdayOpen);
+  assert.equal(yesterdayOpenStreak.status, 200);
+  assert.equal(yesterdayOpenStreak.json.missed_days_before_today, 1);
+  assert.equal(yesterdayOpenStreak.json.missed_days, 2);
+  assert.equal(yesterdayOpenStreak.json.recovery_needed, true);
+
+  const registeredToday = await postCheckin(yesterdayOpen, {});
+  assert.equal(registeredToday.status, 201);
+  const afterRegister = await getStreak(yesterdayOpen);
+  assert.equal(afterRegister.json.recovery_needed, false);
+  assert.equal(afterRegister.json.missed_days_before_today, yesterdayOpenStreak.json.missed_days_before_today);
+  assert.equal(afterRegister.json.missed_days, 0);
+
+  const threeOpen = await getStreak(await createMission(4));
+  assert.equal(threeOpen.json.missed_days_before_today, 3);
+  assert.equal(threeOpen.json.missed_days, 4);
+
+  const startedToday = await getStreak(await createMission(1));
+  assert.equal(startedToday.json.missed_days_before_today, 0);
+
+  const yesterdayDone = await createMission(2);
+  await seedDay(yesterdayDone, 1, false);
+  const yesterdayDoneStreak = await getStreak(yesterdayDone);
+  assert.equal(yesterdayDoneStreak.json.missed_days_before_today, 0);
+  assert.equal(yesterdayDoneStreak.json.missed_days, 1);
+
   const plain = await postCheckin(await createMission(1), { difficult: false });
   assert.equal(plain.status, 201);
   assert.equal(plain.json.checkin.is_difficult, false);

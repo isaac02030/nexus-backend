@@ -10,6 +10,7 @@ const {
   DIFFICULT_DAY_LIMIT,
   validateDifficultDay
 } = require('../lib/difficult-days');
+const { calculateRecoveryState } = require('../lib/recovery-state');
 const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -88,22 +89,6 @@ function calculateBrio(doneDays, todayDay, streak) {
   const brio = Math.min(100, consistencyPart + streakPart + recoveryPart);
 
   return { brio, consistency, recovered: recoveredAfterMiss };
-}
-
-function calculateRecoveryState(doneDays, todayDay) {
-  const missedYesterday = todayDay > 1 && !doneDays.has(todayDay - 1);
-  let missedDays = 0;
-
-  for (let day = todayDay; day >= 1; day--) {
-    if (doneDays.has(day)) break;
-    missedDays++;
-  }
-
-  return {
-    missed_yesterday: missedYesterday,
-    missed_days: missedDays,
-    recovery_needed: missedYesterday && !doneDays.has(todayDay)
-  };
 }
 
 router.post('/', auth, async (req, res) => {

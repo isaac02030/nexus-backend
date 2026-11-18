@@ -35,3 +35,11 @@
 - Em desenvolvimento, o CORS aceita `http://localhost:8080`. Com `NODE_ENV=production`, esse endereço não entra.
 - Prova local num Postgres descartável: a migration rodou duas vezes, o PUT/GET funcionou com login e recusou horário e fuso ruins, e `npm test` passou (11 testes). O padrão dos dois horários extras está no pull request para o dono confirmar.
 - Nada foi mesclado em `main`. Railway não foi alterado.
+
+## Feito em 18/11/2026 — dias difíceis
+
+- Migration `migrations/003_checkin_difficult_day.sql`: coluna `is_difficult` em `checkins`, boolean, padrão false. Check-ins antigos continuam dia normal. Rodar de novo não apaga dado.
+- `POST /api/checkins` aceita `difficult: true`. O servidor recusa o 5º dia difícil e o 3º seguido. O dia difícil fica concluído e entra na sequência, no brío e na recuperação como um dia normal.
+- `GET /api/checkins/:missionId/streak` devolve `difficult_days_used`, `difficult_days_remaining` e `difficult_days`. Cada item de `GET /api/checkins/:missionId` traz `difficult`.
+- Prova local num Postgres descartável: a migration rodou duas vezes, o check-in difícil entrou na sequência como dia feito, o 5º dia e o 3º seguido foram recusados, e `npm test` passou (15 testes).
+- Nada foi mesclado em `main`. Railway não foi alterado.

@@ -3,3 +3,4 @@
 -- This file deliberately does not DROP tables or insert test users.
 \ir migrations/001_initial_schema.sql
 \ir migrations/002_user_reminder.sql
+\ir migrations/003_checkin_difficult_day.sql

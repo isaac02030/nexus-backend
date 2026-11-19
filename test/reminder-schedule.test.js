@@ -74,24 +74,22 @@ test('valida HH:MM e fuso IANA', () => {
   );
 });
 
-test('os dois extras sao +4h e +8h, ou antes se passarem da meia-noite', () => {
-  assert.deepEqual(getReminderSlots('08:00'), [
-    { slot: 'main', at: '08:00', onlyWithoutCheckin: false },
-    { slot: 'extra_plus_4h', at: '12:00', onlyWithoutCheckin: true },
-    { slot: 'extra_plus_8h', at: '16:00', onlyWithoutCheckin: true }
-  ]);
+test('extras ficam entre 09:00 e 21:30, a pelo menos 2h do principal', () => {
+  const table = {
+    '07:00': { midday: '13:00', evening: '20:30' },
+    '09:00': { midday: '13:00', evening: '20:30' },
+    '13:00': { midday: '15:00', evening: '20:30' },
+    '20:00': { midday: '13:00', evening: '18:00' },
+    '22:30': { midday: '13:00', evening: '20:30' }
+  };
 
-  assert.deepEqual(getReminderSlots('21:00'), [
-    { slot: 'main', at: '21:00', onlyWithoutCheckin: false },
-    { slot: 'extra_minus_4h', at: '17:00', onlyWithoutCheckin: true },
-    { slot: 'extra_minus_8h', at: '13:00', onlyWithoutCheckin: true }
-  ]);
-
-  assert.deepEqual(getReminderSlots('19:00'), [
-    { slot: 'main', at: '19:00', onlyWithoutCheckin: false },
-    { slot: 'extra_plus_4h', at: '23:00', onlyWithoutCheckin: true },
-    { slot: 'extra_minus_8h', at: '11:00', onlyWithoutCheckin: true }
-  ]);
+  for (const [main, expected] of Object.entries(table)) {
+    assert.deepEqual(getReminderSlots(main), [
+      { slot: 'main', at: main, onlyWithoutCheckin: false },
+      { slot: 'extra_midday', at: expected.midday, onlyWithoutCheckin: true },
+      { slot: 'extra_evening', at: expected.evening, onlyWithoutCheckin: true }
+    ]);
+  }
 });
 
 test('o lembrete principal sai mesmo quando o check-in de hoje ja existe', () => {
@@ -119,7 +117,7 @@ test('os extras ficam de fora depois do check-in e saem quando ele falta', () =>
 
   const pending = dueSlots(base);
   assert.equal(pending.length, 1);
-  assert.equal(pending[0].slot, 'extra_plus_4h');
+  assert.equal(pending[0].slot, 'extra_midday');
   assert.equal(pending[0].at, '13:00');
   assert.equal(pending[0].localDate, '2026-11-18');
 

@@ -2,7 +2,8 @@
 // NEXUS - Push Notifications
 // Web Push API com VAPID + lembretes diarios.
 // Quem escolheu horario: o principal sai nesse horario (fuso da pessoa),
-// sempre com missao ativa. Os dois extras so saem sem check-in de hoje.
+// sempre com missao ativa. Os dois extras (alvo 13:00 e 20:30, entre
+// 09:00 e 21:30) so saem sem check-in de hoje.
 // Quem nao escolheu mantem as janelas antigas do relogio do servidor.
 // O envio e so push: nao grava mensagem e nao conta no limite de chat.
 // ============================================

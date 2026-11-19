@@ -14,16 +14,6 @@ function missionParticipantWhere(alias = 'm', userParam = '$2') {
   return `(
     ${alias}.user_id = ${userParam}
     OR ${alias}.partner_id = ${userParam}
-    OR EXISTS (
-      SELECT 1 FROM checkins c
-      WHERE c.mission_id = ${alias}.id
-        AND c.user_id = ${userParam}
-    )
-    OR EXISTS (
-      SELECT 1 FROM messages msg
-      WHERE msg.mission_id = ${alias}.id
-        AND msg.sender_id = ${userParam}
-    )
   )`;
 }
 
@@ -210,8 +200,9 @@ router.get('/:missionId/score', auth, async (req, res) => {
        FROM missions m
        LEFT JOIN users u1 ON m.user_id    = u1.id
        LEFT JOIN users u2 ON m.partner_id = u2.id
-       WHERE m.id = $1`,
-      [req.params.missionId]
+       WHERE m.id = $1
+         AND ${missionParticipantWhere('m', '$2')}`,
+      [req.params.missionId, req.user.userId]
     );
 
     const mission = missionRes.rows[0];

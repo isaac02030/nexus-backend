@@ -22,16 +22,6 @@ function missionParticipantWhere(alias = 'm', userParam = '$1') {
   return `(
     ${alias}.user_id = ${userParam}
     OR ${alias}.partner_id = ${userParam}
-    OR EXISTS (
-      SELECT 1 FROM checkins c
-      WHERE c.mission_id = ${alias}.id
-        AND c.user_id = ${userParam}
-    )
-    OR EXISTS (
-      SELECT 1 FROM messages msg
-      WHERE msg.mission_id = ${alias}.id
-        AND msg.sender_id = ${userParam}
-    )
   )`;
 }
 
@@ -356,8 +346,6 @@ router.get('/', auth, async (req, res) => {
        WHERE (
          m.user_id = $1
          OR (m.partner_id = $1 AND pair.id IS NULL)
-         OR EXISTS (SELECT 1 FROM checkins c WHERE c.mission_id = m.id AND c.user_id = $1)
-         OR EXISTS (SELECT 1 FROM messages msg WHERE msg.mission_id = m.id AND msg.sender_id = $1)
        ) AND m.status <> 'merged'
        ORDER BY m.created_at DESC`,
       [req.user.userId]

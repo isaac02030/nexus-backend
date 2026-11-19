@@ -62,6 +62,16 @@ app.use('/api/missions', missionRoutes);
 // GET    /api/missions/match    → encontrar match
 // PATCH  /api/missions/:id      → atualizar estado
 
+// --- CONVITE DE DUO ---
+// NEXUS_CONVITE_POR_LINK=true liga estas rotas. Sem isso, respondem 404.
+const { missionInvites, convites } = require('./routes/invites');
+app.use('/api/missions', missionInvites);
+app.use('/api/convites', convites);
+// POST /api/missions/:id/convite   → criar convite de uso único
+// GET  /api/convites/:code         → prévia: nome e título
+// POST /api/convites/:code/aceitar → aceitar e gravar partner_id
+// POST /api/convites/:code/recusar → recusar o convite
+
 // --- CHECK-INS ---
 const checkinRoutes = require('./routes/checkins');
 app.use('/api/checkins', checkinRoutes);

@@ -1,21 +1,34 @@
 // ============================================
 // NEXUS - Push Notifications
-// Web Push API com VAPID + lembretes diarios
+// Web Push API com VAPID + lembretes diarios.
+// Quem escolheu horario: o principal sai nesse horario (fuso da pessoa),
+// sempre com missao ativa. Os dois extras (alvo 13:00 e 20:30, entre
+// 09:00 e 21:30) so saem sem check-in de hoje.
+// Quem nao escolheu mantem as janelas antigas do relogio do servidor.
+// O envio e so push: nao grava mensagem e nao conta no limite de chat.
 // ============================================
 
 const express = require('express');
 const webpush = require('web-push');
 const { Pool } = require('pg');
 const auth = require('../middleware/auth');
+const {
+  CHECKED_IN_ON_LOCAL_DATE_SQL,
+  getDueReminders,
+  getLocalDateKey,
+  resolveReminderSettings
+} = require('../lib/reminder-schedule');
 
 const router = express.Router();
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
-webpush.setVapidDetails(
-  process.env.VAPID_EMAIL,
-  process.env.VAPID_PUBLIC_KEY,
-  process.env.VAPID_PRIVATE_KEY
-);
+if (process.env.NODE_ENV !== 'test') {
+  webpush.setVapidDetails(
+    process.env.VAPID_EMAIL,
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+}
 
 let reminderSchedulerStarted = false;
 let reminderSweepRunning = false;
@@ -89,8 +102,30 @@ function buildCheckinNotification(mission, actorName) {
   };
 }
 
-function buildReminderCopy(kind, mission, dayNumber) {
+function buildReminderCopy(kind, mission, dayNumber, options = {}) {
   const cleanTitle = (mission.title || 'A missao').trim();
+  const checkedInToday = options.checkedInToday === true;
+
+  if (kind === 'main') {
+    if (checkedInToday) {
+      return {
+        title: 'O lembrete do teu horario.',
+        body: `${cleanTitle}: dia ${dayNumber} ja tem registo.`
+      };
+    }
+
+    return {
+      title: 'Hora do teu lembrete.',
+      body: `${cleanTitle}: este e o horario que escolheste. Falta o registo do dia ${dayNumber}.`
+    };
+  }
+
+  if (typeof kind === 'string' && kind.startsWith('extra_')) {
+    return {
+      title: 'Hoje ainda nao existe prova.',
+      body: `${cleanTitle}: falta o teu registo no dia ${dayNumber}.`
+    };
+  }
 
   switch (kind) {
     case 'midday_recovery':
@@ -131,19 +166,25 @@ async function ensureReminderLogTable() {
   `);
 }
 
-async function wasReminderSent(userId, missionId, kind) {
-  const result = await db.query(
-    `SELECT 1
-     FROM notification_log
-     WHERE user_id = $1 AND mission_id = $2 AND kind = $3 AND sent_on = CURRENT_DATE
-     LIMIT 1`,
-    [userId, missionId, kind]
-  );
-
-  return result.rows.length > 0;
+async function ensureUserReminderColumns() {
+  await db.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS reminder_time TIME,
+      ADD COLUMN IF NOT EXISTS timezone TEXT
+  `);
 }
 
-async function markReminderSent(userId, missionId, kind) {
+async function markReminderSent(userId, missionId, kind, sentOn = null) {
+  if (sentOn) {
+    await db.query(
+      `INSERT INTO notification_log (user_id, mission_id, kind, sent_on)
+       VALUES ($1, $2, $3, $4::date)
+       ON CONFLICT (user_id, mission_id, kind, sent_on) DO NOTHING`,
+      [userId, missionId, kind, sentOn]
+    );
+    return;
+  }
+
   await db.query(
     `INSERT INTO notification_log (user_id, mission_id, kind)
      VALUES ($1, $2, $3)
@@ -152,18 +193,63 @@ async function markReminderSent(userId, missionId, kind) {
   );
 }
 
-function getReminderKind(now, missedYesterday) {
-  const hour = now.getHours();
+async function sentReminderKinds(userId, missionId, sentOn) {
+  const result = sentOn
+    ? await db.query(
+      `SELECT kind
+       FROM notification_log
+       WHERE user_id = $1 AND mission_id = $2 AND sent_on = $3::date`,
+      [userId, missionId, sentOn]
+    )
+    : await db.query(
+      `SELECT kind
+       FROM notification_log
+       WHERE user_id = $1 AND mission_id = $2 AND sent_on = CURRENT_DATE`,
+      [userId, missionId]
+    );
 
-  if (hour >= 12 && hour < 15) {
-    return missedYesterday ? 'midday_recovery' : 'midday_nudge';
+  return result.rows.map(row => row.kind);
+}
+
+async function deliverDueReminders(participant, mission, now, dayNumber, todayDone, yesterdayDone) {
+  const settings = resolveReminderSettings(participant.reminderTime, participant.timezone);
+  if (settings.mode === 'invalid') return;
+
+  const missedYesterday = dayNumber > 1 && !yesterdayDone.has(Number(participant.id));
+  let checkedInToday = false;
+  let sentOn = null;
+
+  if (settings.mode === 'chosen') {
+    sentOn = getLocalDateKey(now, settings.zone);
+    if (!sentOn) return;
+
+    const checked = await db.query(CHECKED_IN_ON_LOCAL_DATE_SQL, [
+      mission.id,
+      participant.id,
+      settings.zone,
+      sentOn
+    ]);
+    checkedInToday = checked.rows.length > 0;
+  } else {
+    checkedInToday = todayDone.has(Number(participant.id));
   }
 
-  if (hour >= 19 && hour < 22) {
-    return missedYesterday ? 'evening_recovery' : 'evening_nudge';
-  }
+  const due = getDueReminders({
+    now,
+    reminderTime: settings.mode === 'chosen' ? settings.clock : null,
+    timezone: settings.mode === 'chosen' ? settings.zone : null,
+    hasActiveMission: true,
+    checkedInToday,
+    missedYesterday,
+    alreadySent: await sentReminderKinds(participant.id, mission.id, sentOn)
+  });
 
-  return null;
+  for (const item of due) {
+    const copy = buildReminderCopy(item.slot, mission, dayNumber, { checkedInToday });
+    // So push. Nao entra em messages nem no assistente, entao nao conta no limite de chat.
+    await sendNotification(participant.id, copy.title, copy.body);
+    await markReminderSent(participant.id, mission.id, item.slot, item.localDate);
+  }
 }
 
 async function runReminderSweep() {
@@ -171,6 +257,7 @@ async function runReminderSweep() {
   reminderSweepRunning = true;
 
   try {
+    await ensureUserReminderColumns();
     await ensureReminderLogTable();
 
     const now = new Date();
@@ -184,8 +271,10 @@ async function runReminderSweep() {
         m.duration_days,
         m.user_id,
         m.partner_id,
-        u1.username AS user_name,
-        u2.username AS partner_name
+        to_char(u1.reminder_time, 'HH24:MI') AS user_reminder_time,
+        u1.timezone AS user_timezone,
+        to_char(u2.reminder_time, 'HH24:MI') AS partner_reminder_time,
+        u2.timezone AS partner_timezone
       FROM missions m
       JOIN users u1 ON u1.id = m.user_id
       LEFT JOIN users u2 ON u2.id = m.partner_id
@@ -206,30 +295,35 @@ async function runReminderSweep() {
       );
 
       const todayDone = new Set(
-        checkinsRes.rows.filter(row => row.day_number === dayNumber).map(row => row.user_id)
+        checkinsRes.rows
+          .filter(row => Number(row.day_number) === dayNumber)
+          .map(row => Number(row.user_id))
       );
       const yesterdayDone = new Set(
-        checkinsRes.rows.filter(row => row.day_number === dayNumber - 1).map(row => row.user_id)
+        checkinsRes.rows
+          .filter(row => Number(row.day_number) === dayNumber - 1)
+          .map(row => Number(row.user_id))
       );
 
       const participants = [
-        { id: mission.user_id, username: mission.user_name },
-        mission.partner_id ? { id: mission.partner_id, username: mission.partner_name } : null
+        {
+          id: mission.user_id,
+          reminderTime: mission.user_reminder_time,
+          timezone: mission.user_timezone
+        },
+        mission.partner_id ? {
+          id: mission.partner_id,
+          reminderTime: mission.partner_reminder_time,
+          timezone: mission.partner_timezone
+        } : null
       ].filter(Boolean);
 
       for (const participant of participants) {
-        if (todayDone.has(participant.id)) continue;
-
-        const missedYesterday = dayNumber > 1 && !yesterdayDone.has(participant.id);
-        const reminderKind = getReminderKind(now, missedYesterday);
-        if (!reminderKind) continue;
-
-        const alreadySent = await wasReminderSent(participant.id, mission.id, reminderKind);
-        if (alreadySent) continue;
-
-        const copy = buildReminderCopy(reminderKind, mission, dayNumber);
-        await sendNotification(participant.id, copy.title, copy.body);
-        await markReminderSent(participant.id, mission.id, reminderKind);
+        try {
+          await deliverDueReminders(participant, mission, now, dayNumber, todayDone, yesterdayDone);
+        } catch (err) {
+          console.error('Erro ao avaliar lembrete:', err.message);
+        }
       }
     }
   } catch (err) {
@@ -243,9 +337,11 @@ function startReminderScheduler() {
   if (reminderSchedulerStarted) return;
   reminderSchedulerStarted = true;
 
-  ensureReminderLogTable().catch(err => {
-    console.error('Erro ao preparar notification_log:', err);
-  });
+  ensureUserReminderColumns()
+    .then(() => ensureReminderLogTable())
+    .catch(err => {
+      console.error('Erro ao preparar lembretes:', err.message);
+    });
 
   setTimeout(runReminderSweep, 20000);
   setInterval(runReminderSweep, 15 * 60 * 1000);
@@ -311,6 +407,8 @@ router.post('/message', auth, async (req, res) => {
   }
 });
 
-startReminderScheduler();
+if (process.env.NODE_ENV !== 'test') {
+  startReminderScheduler();
+}
 
 module.exports = { router, sendNotification };

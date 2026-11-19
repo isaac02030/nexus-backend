@@ -10,6 +10,24 @@ const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
+function communityMissionParticipantWhere(alias = 'cm', userParam = '$2') {
+  return `EXISTS (
+    SELECT 1 FROM community_mission_participants
+    WHERE community_mission_id = ${alias}.id
+      AND user_id = ${userParam}
+  )`;
+}
+
+async function findCommunityMissionForParticipant(missionId, userId) {
+  const missionRes = await db.query(
+    `SELECT * FROM community_missions cm
+     WHERE cm.id = $1
+       AND ${communityMissionParticipantWhere('cm', '$2')}`,
+    [missionId, userId]
+  );
+  return missionRes.rows[0] || null;
+}
+
 const CATEGORY_PROGRESS_SELECT = `
   COALESCE((
     SELECT COUNT(DISTINCT ch.day_number)
@@ -230,6 +248,7 @@ router.post('/:slug/:missionId/checkin', auth, async (req, res) => {
       [mission.id, userId]
     );
     if (!partRes.rows[0]) return res.status(403).json({ error: 'Não és participante desta missão.' });
+    if (mission.status !== 'active') return res.status(400).json({ error: 'Missão não está ativa.' });
 
     // Calcular dia
     const started   = new Date(mission.starts_at);
@@ -283,12 +302,8 @@ router.get('/:slug/:missionId/ranking', auth, async (req, res) => {
   const scope  = req.query.scope || 'mundial';
 
   try {
-    // Buscar missão para saber o seu scope original
-    const missionRes = await db.query(
-      'SELECT * FROM community_missions WHERE id = $1',
-      [req.params.missionId]
-    );
-    const mission = missionRes.rows[0];
+    // Quem não participa recebe o mesmo 404 de missão inexistente.
+    const mission = await findCommunityMissionForParticipant(req.params.missionId, userId);
     if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
 
     // Para scope regional e local precisamos do país/cidade do utilizador
@@ -330,6 +345,10 @@ router.get('/:slug/:missionId/ranking', auth, async (req, res) => {
   const { scope } = req.query; // mundial, regional, local
 
   try {
+    if (!await findCommunityMissionForParticipant(req.params.missionId, req.user.userId)) {
+      return res.status(404).json({ error: 'Missão não encontrada.' });
+    }
+
     let query = `
       SELECT cmp.score, cmp.completed, u.username,
         ROW_NUMBER() OVER (ORDER BY cmp.score DESC) AS position
@@ -409,6 +428,10 @@ router.get('/:slug/scope/:scope', auth, async (req, res) => {
 // ============================================
 router.get('/:slug/:missionId/ranking', auth, async (req, res) => {
   try {
+    if (!await findCommunityMissionForParticipant(req.params.missionId, req.user.userId)) {
+      return res.status(404).json({ error: 'Missão não encontrada.' });
+    }
+
     const result = await db.query(
       `SELECT cmp.score, cmp.completed, u.username,
         ROW_NUMBER() OVER (ORDER BY cmp.score DESC) AS position
@@ -431,6 +454,10 @@ router.get('/:slug/:missionId/ranking', auth, async (req, res) => {
 router.get('/:slug/:missionId/ranking', auth, async (req, res) => {
   const userId = req.user.userId;
   try {
+    if (!await findCommunityMissionForParticipant(req.params.missionId, userId)) {
+      return res.status(404).json({ error: 'Missão não encontrada.' });
+    }
+
     const result = await db.query(
       `SELECT cmp.score, cmp.completed, u.id AS user_id, u.username,
         ROW_NUMBER() OVER (ORDER BY cmp.score DESC) AS position

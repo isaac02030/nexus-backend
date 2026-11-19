@@ -36,9 +36,15 @@
 ## Pendente nesta correção
 - Assistente da missão: já exige participante atual e ainda aceita missão encerrada.
 - Notificações de check-in e de mensagem: já exigem participante atual e não checam se a missão está ativa.
-- Missões de comunidade: o check-in exige a tabela de participantes e não exige missão ativa; o ranking não exige participação.
+- Missões de comunidade: ranking e check-in ativo foram tratados na seção seguinte.
 - A rotina que preenche `partner_id` vazio a partir do histórico continua valendo quando o modo ainda é parceiro ou rival.
 - Nada foi mesclado em `main`.
 
 ## Dúvidas nesta correção
 - Nenhuma.
+
+## Feito em 19/11/2026 — ranking e check-in da comunidade
+- O ranking só abre para quem está em `community_mission_participants`. Quem não participa recebe 404, o mesmo corpo de missão inexistente.
+- O check-in da comunidade exige missão `active`. Se não estiver, a recusa é 400: «Missão não está ativa.».
+- Participante de missão ativa continua fazendo check-in. Solo, Duo e Rival não mudaram. Sem schema nem migração.
+- Testes novos em `test/community-missions-access.test.js`. `node --test` passou.

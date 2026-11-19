@@ -263,7 +263,7 @@ convites.post('/:code/aceitar', requireConvite, async (req, res) => {
 
     if (outcome.status === 404) return inviteNotFound(res);
     if (outcome.status === 403) {
-      return res.status(403).json({ error: 'Não podes aceitar o teu próprio convite.' });
+      return res.status(403).json({ error: 'Você não pode aceitar o seu próprio convite.' });
     }
 
     return res.json({
@@ -309,7 +309,7 @@ convites.post('/:code/recusar', requireConvite, async (req, res) => {
 
     if (outcome.status === 404) return inviteNotFound(res);
     if (outcome.status === 403) {
-      return res.status(403).json({ error: 'Não podes recusar o teu próprio convite.' });
+      return res.status(403).json({ error: 'Você não pode recusar o seu próprio convite.' });
     }
     return res.json({ declined: true });
   } catch (err) {

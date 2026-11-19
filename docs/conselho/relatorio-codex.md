@@ -46,6 +46,6 @@
 ## Feito em 19/11/2026 — convite de Duo
 
 - Convite de uso único para Duo, atrás de `NEXUS_CONVITE_POR_LINK`. Sem `true`, as rotas respondem 404. A validade é `INVITE_TTL_HOURS` (48).
-- Migração nova `002_mission_invites.sql` (também no `database.sql`): tabela `mission_invites`. O banco guarda só o hash do código.
+- Migração nova `004_mission_invites.sql` (também no `database.sql`): tabela `mission_invites`. O banco guarda só o hash do código. Os números 002 e 003 ficam com outros PRs abertos.
 - Cria quem é dono de uma Solo ativa ou de um Duo à espera. Aceitar grava `partner_id` na mesma transação. A prévia devolve só o nome e o título.
 - O emparelhamento automático não mudou. A migração não foi aplicada num banco real. Nada foi mesclado.

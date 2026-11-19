@@ -19,7 +19,7 @@ CREATE INDEX IF NOT EXISTS idx_mission_invites_mission ON mission_invites(missio
 CREATE INDEX IF NOT EXISTS idx_mission_invites_pending ON mission_invites(mission_id, expires_at) WHERE status = 'pending';
 
 INSERT INTO schema_migrations (version)
-VALUES ('002_mission_invites')
+VALUES ('004_mission_invites')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

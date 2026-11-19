@@ -506,7 +506,7 @@ describe('convite de duo', { concurrency: 1 }, () => {
     });
 
     assert.equal(own.status, 403);
-    assert.deepEqual(own.body, { error: 'Não podes aceitar o teu próprio convite.' });
+    assert.deepEqual(own.body, { error: 'Você não pode aceitar o seu próprio convite.' });
     assert.equal(state.invites[0].status, 'pending');
     assert.equal(state.missions[0].partner_id, null);
 
@@ -517,6 +517,20 @@ describe('convite de duo', { concurrency: 1 }, () => {
     assert.equal(other.status, 200);
     assert.equal(state.invites[0].status, 'used');
     assert.equal(state.missions[0].partner_id, 2);
+  });
+
+  test('o dono nao recusa o proprio convite', async () => {
+    useState([mission()]);
+    const created = await createInvite();
+
+    const own = await request('POST', `/api/convites/${created.body.code}/recusar`, {
+      token: tokenFor(1)
+    });
+
+    assert.equal(own.status, 403);
+    assert.deepEqual(own.body, { error: 'Você não pode recusar o seu próprio convite.' });
+    assert.equal(state.invites[0].status, 'pending');
+    assert.equal(state.missions[0].partner_id, null);
   });
 
   test('recusar marca o convite e o aceite seguinte recebe o mesmo 404', async () => {

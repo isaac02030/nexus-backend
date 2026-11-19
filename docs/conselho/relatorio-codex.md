@@ -25,3 +25,20 @@
 ## Pendente nesta etapa
 - Backup automático em produção.
 - Nada foi mesclado em `main`. Railway não foi alterado.
+
+## Feito em 19/11/2026 — acesso à missão
+
+- O placar só é lido por quem ainda é `user_id` ou `partner_id`. Quem não participa recebe 404, o mesmo corpo de missão inexistente.
+- Check-in, progresso, sequência, detalhe, lista e mensagens deixam de tratar check-in ou mensagem antiga como participação. Escrever check-in ou mensagem exige missão ativa.
+- Quem já participa e a missão não está ativa continua recebendo a recusa de missão inativa.
+- Oito testes em `test/checkins-access.test.js` passaram com `node --test`.
+
+## Pendente nesta correção
+- Assistente da missão: já exige participante atual e ainda aceita missão encerrada.
+- Notificações de check-in e de mensagem: já exigem participante atual e não checam se a missão está ativa.
+- Missões de comunidade: o check-in exige a tabela de participantes e não exige missão ativa; o ranking não exige participação.
+- A rotina que preenche `partner_id` vazio a partir do histórico continua valendo quando o modo ainda é parceiro ou rival.
+- Nada foi mesclado em `main`.
+
+## Dúvidas nesta correção
+- Nenhuma.

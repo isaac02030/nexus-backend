@@ -14,16 +14,6 @@ function missionParticipantWhere(alias = 'm', userParam = '$2') {
   return `(
     ${alias}.user_id = ${userParam}
     OR ${alias}.partner_id = ${userParam}
-    OR EXISTS (
-      SELECT 1 FROM checkins c
-      WHERE c.mission_id = ${alias}.id
-        AND c.user_id = ${userParam}
-    )
-    OR EXISTS (
-      SELECT 1 FROM messages msg
-      WHERE msg.mission_id = ${alias}.id
-        AND msg.sender_id = ${userParam}
-    )
   )`;
 }
 
@@ -49,8 +39,12 @@ router.post('/', auth, async (req, res) => {
       [mission_id, userId]
     );
 
-    if (!missionRes.rows[0]) {
+    const mission = missionRes.rows[0];
+    if (!mission) {
       return res.status(403).json({ error: 'Sem acesso a esta missao.' });
+    }
+    if (mission.status !== 'active') {
+      return res.status(400).json({ error: 'Missao nao esta ativa.' });
     }
 
     const duplicateRes = await db.query(

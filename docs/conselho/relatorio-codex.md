@@ -66,3 +66,13 @@
 - A migração `002_user_reminder.sql` não foi alterada. Na codex só existia a `001`, então não houve conflito de número.
 - Testes novos: meia-noite em fusos diferentes, último dia da missão, e a rota do lembrete com banco simulado. `node --test`: 31 passaram, 1 pulado (o teste antigo de Postgres real, que não rodou).
 - Nada foi mesclado em `main`.
+
+## Feito em 20/11/2026 — dias difíceis de novo, em cima do fuso
+
+- O conteúdo do PR 3 voltou num branch novo, em cima do lembrete com fuso. O placar e o check-in continuam só para dono ou parceiro atual. Check-in ou mensagem antiga não devolve acesso.
+- Cada pessoa tem 4 dias difíceis na missão, no máximo 2 seguidos. O dia difícil continua concluído e passa pela mesma prova do check-in. A conta é por pessoa.
+- A contagem e a gravação do dia difícil ficam na mesma transação, com `SELECT ... FOR UPDATE` na missão.
+- O número do dia do check-in usa o fuso da pessoa quando o horário do aviso também está escolhido. Fuso vazio continua no relógio do servidor.
+- Migração `003_checkin_difficult_day.sql` só acrescenta `is_difficult`, padrão falso. A ordem no `database.sql` é 001, 002, 003.
+- `node --test`: 48 passaram, 1 pulado (o Postgres real do lembrete, que não rodou).
+- Nada foi mesclado em `main`. O PR 3 antigo permanece aberto.

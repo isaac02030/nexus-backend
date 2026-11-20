@@ -4,6 +4,7 @@
 // Quem escolheu horario: o principal sai nesse horario (fuso da pessoa),
 // sempre com missao ativa. Os dois extras (alvo 13:00 e 20:30, entre
 // 09:00 e 21:30) so saem sem check-in de hoje.
+// O numero do dia e o corte do fim da missao usam o mesmo fuso da hora do aviso.
 // Quem nao escolheu mantem as janelas antigas do relogio do servidor.
 // O envio e so push: nao grava mensagem e nao conta no limite de chat.
 // ============================================
@@ -15,7 +16,10 @@ const auth = require('../middleware/auth');
 const {
   CHECKED_IN_ON_LOCAL_DATE_SQL,
   getDueReminders,
+  getLegacyMissionDayNumber,
   getLocalDateKey,
+  getMissionDayNumber,
+  isMissionDayOpen,
   resolveReminderSettings
 } = require('../lib/reminder-schedule');
 
@@ -252,15 +256,26 @@ async function deliverDueReminders(participant, mission, now, dayNumber, todayDo
   }
 }
 
-async function runReminderSweep() {
+function missionDayFor(participant, mission, now) {
+  const settings = resolveReminderSettings(participant.reminderTime, participant.timezone);
+  if (settings.mode === 'invalid') return null;
+
+  // O fuso da hora do aviso. Sem horario escolhido, fica o calculo antigo.
+  const dayNumber = settings.mode === 'chosen'
+    ? getMissionDayNumber(mission.started_at, now, settings.zone)
+    : getLegacyMissionDayNumber(mission.started_at, now);
+
+  if (!isMissionDayOpen(dayNumber, mission.duration_days)) return null;
+  return dayNumber;
+}
+
+async function runReminderSweep(now = new Date()) {
   if (reminderSweepRunning) return;
   reminderSweepRunning = true;
 
   try {
     await ensureUserReminderColumns();
     await ensureReminderLogTable();
-
-    const now = new Date();
 
     const missionsRes = await db.query(`
       SELECT
@@ -282,29 +297,6 @@ async function runReminderSweep() {
     `);
 
     for (const mission of missionsRes.rows) {
-      const startedAt = new Date(mission.started_at);
-      const dayNumber = Math.floor((now - startedAt) / (1000 * 60 * 60 * 24)) + 1;
-
-      if (dayNumber < 1 || dayNumber > mission.duration_days) continue;
-
-      const checkinsRes = await db.query(
-        `SELECT user_id, day_number
-         FROM checkins
-         WHERE mission_id = $1 AND completed = true AND day_number IN ($2, $3)`,
-        [mission.id, dayNumber, Math.max(dayNumber - 1, 1)]
-      );
-
-      const todayDone = new Set(
-        checkinsRes.rows
-          .filter(row => Number(row.day_number) === dayNumber)
-          .map(row => Number(row.user_id))
-      );
-      const yesterdayDone = new Set(
-        checkinsRes.rows
-          .filter(row => Number(row.day_number) === dayNumber - 1)
-          .map(row => Number(row.user_id))
-      );
-
       const participants = [
         {
           id: mission.user_id,
@@ -318,9 +310,47 @@ async function runReminderSweep() {
         } : null
       ].filter(Boolean);
 
+      const active = [];
       for (const participant of participants) {
+        const dayNumber = missionDayFor(participant, mission, now);
+        if (dayNumber == null) continue;
+        active.push({ participant, dayNumber });
+      }
+      if (active.length === 0) continue;
+
+      const dayNumbers = [...new Set(active.flatMap((item) => [
+        item.dayNumber,
+        Math.max(item.dayNumber - 1, 1)
+      ]))];
+      const placeholders = dayNumbers.map((_, index) => `$${index + 2}`).join(', ');
+      const checkinsRes = await db.query(
+        `SELECT user_id, day_number
+         FROM checkins
+         WHERE mission_id = $1 AND completed = true AND day_number IN (${placeholders})`,
+        [mission.id, ...dayNumbers]
+      );
+
+      for (const item of active) {
+        const todayDone = new Set(
+          checkinsRes.rows
+            .filter(row => Number(row.day_number) === item.dayNumber)
+            .map(row => Number(row.user_id))
+        );
+        const yesterdayDone = new Set(
+          checkinsRes.rows
+            .filter(row => Number(row.day_number) === item.dayNumber - 1)
+            .map(row => Number(row.user_id))
+        );
+
         try {
-          await deliverDueReminders(participant, mission, now, dayNumber, todayDone, yesterdayDone);
+          await deliverDueReminders(
+            item.participant,
+            mission,
+            now,
+            item.dayNumber,
+            todayDone,
+            yesterdayDone
+          );
         } catch (err) {
           console.error('Erro ao avaliar lembrete:', err.message);
         }
@@ -411,4 +441,4 @@ if (process.env.NODE_ENV !== 'test') {
   startReminderScheduler();
 }
 
-module.exports = { router, sendNotification };
+module.exports = { router, sendNotification, runReminderSweep };

@@ -5,7 +5,10 @@ const {
   REMINDER_TIME_MESSAGE,
   TIMEZONE_MESSAGE,
   getDueReminders,
+  getLegacyMissionDayNumber,
+  getMissionDayNumber,
   getReminderSlots,
+  isMissionDayOpen,
   resolveReminderSettings,
   validateReminderPayload
 } = require('../lib/reminder-schedule');
@@ -240,4 +243,45 @@ test('horario escolhido invalido nao volta para a janela antiga', () => {
     timezone: 'Europe/Lisbon'
   });
   assert.deepEqual(due, []);
+});
+
+test('perto da meia-noite o dia da missao segue o fuso da pessoa', () => {
+  const started = '2026-11-01T15:00:00.000Z';
+  const now = '2026-11-08T02:30:00.000Z';
+
+  assert.equal(getMissionDayNumber(started, now, 'America/Sao_Paulo'), 7);
+  assert.equal(getMissionDayNumber(started, now, 'Europe/Lisbon'), 8);
+  assert.equal(getMissionDayNumber(started, now, 'Asia/Tokyo'), 7);
+
+  assert.equal(isMissionDayOpen(getMissionDayNumber(started, now, 'America/Sao_Paulo'), 7), true);
+  assert.equal(isMissionDayOpen(getMissionDayNumber(started, now, 'Europe/Lisbon'), 7), false);
+  assert.equal(isMissionDayOpen(getMissionDayNumber(started, now, 'Asia/Tokyo'), 7), true);
+});
+
+test('o ultimo dia ainda vale no fuso da pessoa e acaba na meia-noite local', () => {
+  const started = '2026-11-01T15:00:00.000Z';
+  const stillLastNight = '2026-11-08T02:30:00.000Z';
+  const justAfterLocalMidnight = '2026-11-08T03:30:00.000Z';
+
+  assert.equal(getMissionDayNumber(started, stillLastNight, 'America/Sao_Paulo'), 7);
+  assert.equal(isMissionDayOpen(7, 7), true);
+
+  assert.equal(getMissionDayNumber(started, justAfterLocalMidnight, 'America/Sao_Paulo'), 8);
+  assert.equal(isMissionDayOpen(
+    getMissionDayNumber(started, justAfterLocalMidnight, 'America/Sao_Paulo'),
+    7
+  ), false);
+
+  assert.equal(getMissionDayNumber(started, justAfterLocalMidnight, 'Asia/Tokyo'), 7);
+  assert.equal(isMissionDayOpen(
+    getMissionDayNumber(started, justAfterLocalMidnight, 'Asia/Tokyo'),
+    7
+  ), true);
+
+  const serverDay = getLegacyMissionDayNumber(started, justAfterLocalMidnight);
+  assert.equal(serverDay, 7);
+  assert.notEqual(
+    getMissionDayNumber(started, justAfterLocalMidnight, 'America/Sao_Paulo'),
+    serverDay
+  );
 });

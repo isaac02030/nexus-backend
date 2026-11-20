@@ -58,3 +58,11 @@
 - O check-in da comunidade exige missão `active`. Se não estiver, a recusa é 400: «Missão não está ativa.».
 - Participante de missão ativa continua fazendo check-in. Solo, Duo e Rival não mudaram. Sem schema nem migração.
 - Testes novos em `test/community-missions-access.test.js`. `node --test` passou.
+
+## Feito em 20/11/2026 — dia da missão no fuso da pessoa
+
+- O conteúdo do horário do lembrete (PR 2) foi trazido para esta branch. O script de teste continua `node --test`.
+- O número do dia e o corte do fim da missão usam o fuso da pessoa, o mesmo da hora do aviso. Quem não escolheu horário continua no cálculo antigo.
+- A migração `002_user_reminder.sql` não foi alterada. Na codex só existia a `001`, então não houve conflito de número.
+- Testes novos: meia-noite em fusos diferentes, último dia da missão, e a rota do lembrete com banco simulado. `node --test`: 31 passaram, 1 pulado (o teste antigo de Postgres real, que não rodou).
+- Nada foi mesclado em `main`.

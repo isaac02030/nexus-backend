@@ -7,6 +7,7 @@ const express  = require('express');
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
 const { Pool } = require('pg');
+const { validateReminderPayload } = require('../lib/reminder-schedule');
 const router   = express.Router();
 
 // Ligação à base de dados
@@ -15,7 +16,9 @@ const db = new Pool({ connectionString: process.env.DATABASE_URL });
 async function ensureUserProfileColumns() {
   await db.query(`
     ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS avatar_url TEXT
+    ADD COLUMN IF NOT EXISTS avatar_url TEXT,
+    ADD COLUMN IF NOT EXISTS reminder_time TIME,
+    ADD COLUMN IF NOT EXISTS timezone TEXT
   `);
 }
 
@@ -143,6 +146,62 @@ router.get('/me', auth, async (req, res) => {
     res.json({ user });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao carregar sessao.' });
+  }
+});
+
+router.get('/me/reminder', auth, async (req, res) => {
+  try {
+    await ensureUserProfileColumns();
+
+    const result = await db.query(
+      `SELECT to_char(reminder_time, 'HH24:MI') AS reminder_time, timezone
+       FROM users
+       WHERE id = $1`,
+      [req.user.userId]
+    );
+
+    const user = result.rows[0];
+    if (!user) {
+      return res.status(404).json({ error: 'Utilizador nao encontrado.' });
+    }
+
+    res.json({
+      reminder_time: user.reminder_time,
+      timezone: user.timezone || null
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao carregar o lembrete.' });
+  }
+});
+
+router.put('/me/reminder', auth, async (req, res) => {
+  const validation = validateReminderPayload(req.body);
+  if (!validation.ok) {
+    return res.status(400).json({ error: validation.error });
+  }
+
+  try {
+    await ensureUserProfileColumns();
+
+    const result = await db.query(
+      `UPDATE users
+       SET reminder_time = $1::time, timezone = $2, updated_at = NOW()
+       WHERE id = $3
+       RETURNING to_char(reminder_time, 'HH24:MI') AS reminder_time, timezone`,
+      [validation.value.reminder_time, validation.value.timezone, req.user.userId]
+    );
+
+    const user = result.rows[0];
+    if (!user) {
+      return res.status(404).json({ error: 'Utilizador nao encontrado.' });
+    }
+
+    res.json({
+      reminder_time: user.reminder_time,
+      timezone: user.timezone || null
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao guardar o lembrete.' });
   }
 });
 

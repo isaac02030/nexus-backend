@@ -26,6 +26,16 @@
 - Backup automático em produção.
 - Nada foi mesclado em `main`. Railway não foi alterado.
 
+## Feito em 18/11/2026 — horário do lembrete
+
+- Migration `migrations/002_user_reminder.sql`: colunas `reminder_time` e `timezone` em `users`, as duas podem ficar vazias. Rodar de novo não apaga dado.
+- Rotas `GET` e `PUT /api/users/me/reminder`, com login. Horário inválido ou fuso inválido responde 400 em português.
+- Quem escolhe um horário recebe esse lembrete todo dia, se a missão estiver ativa. Os outros dois avisos têm alvo 13:00 e 20:30, só entre 09:00 e 21:30, a pelo menos 2 horas do horário principal e um do outro, e só saem se o check-in de hoje, no fuso da pessoa, ainda não foi feito. Quem não escolheu horário continua no comportamento antigo.
+- Esses avisos são só push. Não entram no chat e não contam no limite de conversas com a IA.
+- Em desenvolvimento, o CORS aceita `http://localhost:8080`. Com `NODE_ENV=production`, esse endereço não entra.
+- Prova local num Postgres descartável: a migration rodou duas vezes, o PUT/GET funcionou com login e recusou horário e fuso ruins, e `npm test` passou (11 testes). O padrão dos dois horários extras está no pull request para o dono confirmar.
+- Nada foi mesclado em `main`. Railway não foi alterado.
+
 ## Feito em 19/11/2026 — acesso à missão
 
 - O placar só é lido por quem ainda é `user_id` ou `partner_id`. Quem não participa recebe 404, o mesmo corpo de missão inexistente.
@@ -48,3 +58,11 @@
 - O check-in da comunidade exige missão `active`. Se não estiver, a recusa é 400: «Missão não está ativa.».
 - Participante de missão ativa continua fazendo check-in. Solo, Duo e Rival não mudaram. Sem schema nem migração.
 - Testes novos em `test/community-missions-access.test.js`. `node --test` passou.
+
+## Feito em 20/11/2026 — dia da missão no fuso da pessoa
+
+- O conteúdo do horário do lembrete (PR 2) foi trazido para esta branch. O script de teste continua `node --test`.
+- O número do dia e o corte do fim da missão usam o fuso da pessoa, o mesmo da hora do aviso. Quem não escolheu horário continua no cálculo antigo.
+- A migração `002_user_reminder.sql` não foi alterada. Na codex só existia a `001`, então não houve conflito de número.
+- Testes novos: meia-noite em fusos diferentes, último dia da missão, e a rota do lembrete com banco simulado. `node --test`: 31 passaram, 1 pulado (o teste antigo de Postgres real, que não rodou).
+- Nada foi mesclado em `main`.

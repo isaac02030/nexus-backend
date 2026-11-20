@@ -6,6 +6,16 @@
 const express  = require('express');
 const { Pool } = require('pg');
 const auth     = require('../middleware/auth');
+const {
+  DIFFICULT_DAY_LIMIT,
+  validateDifficultDay
+} = require('../lib/difficult-days');
+const { calculateRecoveryState } = require('../lib/recovery-state');
+const {
+  getLegacyMissionDayNumber,
+  getMissionDayNumber,
+  resolveReminderSettings
+} = require('../lib/reminder-schedule');
 const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -39,6 +49,46 @@ function getProofValidation(proofMode, note) {
   return null;
 }
 
+function isDifficultDay(row) {
+  return row.is_difficult === true;
+}
+
+function withDifficultFlag(row) {
+  return {
+    ...row,
+    difficult: isDifficultDay(row)
+  };
+}
+
+// O mesmo corte dos avisos: fuso da pessoa só quando o horário também foi
+// escolhido. Fuso vazio, ou horário sem fuso, fica no relógio do servidor.
+function dayNumberFor(startedAt, reminderTime, timezone, now = new Date()) {
+  const settings = resolveReminderSettings(reminderTime, timezone);
+  if (settings.mode === 'chosen') {
+    return getMissionDayNumber(startedAt, now, settings.zone);
+  }
+  return getLegacyMissionDayNumber(startedAt, now);
+}
+
+async function reminderClock(userId, executor) {
+  const result = await executor.query(
+    `SELECT to_char(reminder_time, 'HH24:MI') AS reminder_time, timezone
+     FROM users
+     WHERE id = $1`,
+    [userId]
+  );
+  return result.rows[0] || {};
+}
+
+async function missionDayNumber(mission, userId, executor = db, now = new Date()) {
+  const clock = await reminderClock(userId, executor);
+  return dayNumberFor(mission.started_at, clock.reminder_time, clock.timezone, now);
+}
+
+function sameId(left, right) {
+  return right != null && Number(left) === Number(right);
+}
+
 function calculateBrio(doneDays, todayDay, streak) {
   const completedDays = doneDays.size;
   const totalDays = Math.max(todayDay, 1);
@@ -65,25 +115,10 @@ function calculateBrio(doneDays, todayDay, streak) {
   return { brio, consistency, recovered: recoveredAfterMiss };
 }
 
-function calculateRecoveryState(doneDays, todayDay) {
-  const missedYesterday = todayDay > 1 && !doneDays.has(todayDay - 1);
-  let missedDays = 0;
-
-  for (let day = todayDay; day >= 1; day--) {
-    if (doneDays.has(day)) break;
-    missedDays++;
-  }
-
-  return {
-    missed_yesterday: missedYesterday,
-    missed_days: missedDays,
-    recovery_needed: missedYesterday && !doneDays.has(todayDay)
-  };
-}
-
 router.post('/', auth, async (req, res) => {
-  const { mission_id, note } = req.body;
+  const { mission_id, note, difficult } = req.body;
   const userId = req.user.userId;
+  const wantsDifficult = difficult === true;
 
   if (!mission_id) {
     return res.status(400).json({ error: 'mission_id é obrigatório.' });
@@ -105,44 +140,11 @@ router.post('/', auth, async (req, res) => {
       return res.status(400).json({ error: proofError });
     }
 
-    const started   = new Date(mission.started_at);
-    const today     = new Date();
-    const dayNumber = Math.floor((today - started) / (1000 * 60 * 60 * 24)) + 1;
-
-    if (dayNumber > mission.duration_days) {
-      return res.status(400).json({ error: 'A missão já terminou.' });
-    }
-
-    // Verificar se já fez check-in hoje
-    const existing = await db.query(
-      `SELECT * FROM checkins WHERE mission_id = $1 AND user_id = $2 AND day_number = $3`,
-      [mission_id, userId, dayNumber]
-    );
-    const alreadyDone = existing.rows.length > 0 && existing.rows[0].completed === true;
-
-    // Registar o check-in
-    const checkinRes = await db.query(
-      `INSERT INTO checkins (mission_id, user_id, day_number, completed, note)
-       VALUES ($1, $2, $3, true, $4)
-       ON CONFLICT (mission_id, user_id, day_number)
-       DO UPDATE SET completed = true, note = $4
-       RETURNING *`,
-      [mission_id, userId, dayNumber, note || null]
-    );
-
-    // Só incrementar pontuação se for a primeira vez hoje
-    if (!alreadyDone) {
-      await updateScore(mission, userId, db);
-    }
-
-    await checkMissionCompletion(mission, userId, db);
-
-    res.status(201).json({
-      checkin: checkinRes.rows[0],
-      day: dayNumber,
-      already_done: alreadyDone,
-      message: alreadyDone ? `Dia ${dayNumber} já estava registado!` : `Dia ${dayNumber} registado! 🔥`
-    });
+    // Comum e difícil usam a mesma transação e a mesma trava da missão.
+    // O dia é calculado depois da trava, para dois pedidos não somarem
+    // o ponto duas vezes nem passarem de 4 ou de 2 seguidos.
+    const recorded = await recordCheckin({ mission, userId, note, wantsDifficult });
+    return res.status(recorded.status).json(recorded.body);
 
   } catch (err) {
     res.status(500).json({ error: 'Erro ao registar check-in.' });
@@ -183,7 +185,12 @@ router.get('/:missionId', auth, async (req, res) => {
 
     const byUser = result.rows.reduce((acc, row) => {
       if (!acc[row.user_id]) acc[row.user_id] = { username: row.username, checkins: [] };
-      acc[row.user_id].checkins.push({ day: row.day_number, completed: row.completed, note: row.note });
+      acc[row.user_id].checkins.push({
+        day: row.day_number,
+        completed: row.completed,
+        note: row.note,
+        difficult: isDifficultDay(row)
+      });
       return acc;
     }, {});
 
@@ -245,9 +252,7 @@ router.get('/:missionId/score', auth, async (req, res) => {
     // Calcular sequência atual (dias consecutivos a partir do dia de hoje)
     let myStreak = 0;
     if (mission.started_at) {
-      const started    = new Date(mission.started_at);
-      const today      = new Date();
-      const currentDay = Math.floor((today - started) / (1000 * 60 * 60 * 24)) + 1;
+      const currentDay = await missionDayNumber(mission, req.user.userId);
 
       const streakRes = await db.query(
         `SELECT day_number FROM checkins
@@ -277,6 +282,160 @@ router.get('/:missionId/score', auth, async (req, res) => {
   }
 });
 
+async function updateScore(mission, userId, executor) {
+  const field = Number(mission.user_id) === Number(userId) ? 'user_score' : 'partner_score';
+  await executor.query(`UPDATE missions SET ${field} = ${field} + 1 WHERE id = $1`, [mission.id]);
+}
+
+function checkinMessage(dayNumber, alreadyDone) {
+  return alreadyDone ? `Dia ${dayNumber} já estava registado!` : `Dia ${dayNumber} registado! 🔥`;
+}
+
+// Trava a missão, calcula o dia e grava o check-in antes de soltar a trava.
+// Vale para o dia comum e para o difícil. A cota difícil é por pessoa.
+async function recordCheckin({ mission, userId, note, wantsDifficult }) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const lockedRes = await client.query(
+      `SELECT id, user_id, partner_id, status, duration_days, started_at
+       FROM missions
+       WHERE id = $1
+       FOR UPDATE`,
+      [mission.id]
+    );
+    const locked = lockedRes.rows[0];
+    const participates = locked && (
+      sameId(locked.user_id, userId) || sameId(locked.partner_id, userId)
+    );
+    if (!participates) {
+      await client.query('ROLLBACK');
+      return { status: 404, body: { error: 'Missão não encontrada.' } };
+    }
+    if (locked.status !== 'active') {
+      await client.query('ROLLBACK');
+      return { status: 400, body: { error: 'Missão não está ativa.' } };
+    }
+
+    const dayNumber = await missionDayNumber(locked, userId, client);
+    if (!Number.isInteger(dayNumber) || dayNumber < 1) {
+      await client.query('ROLLBACK');
+      return { status: 400, body: { error: 'A missão ainda não começou.' } };
+    }
+    if (dayNumber > locked.duration_days) {
+      await client.query('ROLLBACK');
+      return { status: 400, body: { error: 'A missão já terminou.' } };
+    }
+
+    if (wantsDifficult) {
+      const difficultRes = await client.query(
+        `SELECT day_number
+         FROM checkins
+         WHERE mission_id = $1 AND user_id = $2 AND is_difficult = true
+         FOR UPDATE`,
+        [mission.id, userId]
+      );
+      const decision = validateDifficultDay({
+        difficultDays: difficultRes.rows.map(row => row.day_number),
+        dayNumber
+      });
+      if (!decision.ok) {
+        await client.query('ROLLBACK');
+        return { status: 400, body: { error: decision.error } };
+      }
+    }
+
+    const existing = await client.query(
+      `SELECT completed
+       FROM checkins
+       WHERE mission_id = $1 AND user_id = $2 AND day_number = $3
+       FOR UPDATE`,
+      [mission.id, userId, dayNumber]
+    );
+    const alreadyDone = existing.rows.length > 0 && existing.rows[0].completed === true;
+
+    const checkinRes = await client.query(
+      `INSERT INTO checkins (mission_id, user_id, day_number, completed, note, is_difficult)
+       VALUES ($1, $2, $3, true, $4, $5)
+       ON CONFLICT (mission_id, user_id, day_number)
+       DO UPDATE SET completed = true,
+                     note = $4,
+                     is_difficult = checkins.is_difficult OR EXCLUDED.is_difficult
+       RETURNING *`,
+      [mission.id, userId, dayNumber, note || null, wantsDifficult]
+    );
+
+    if (!alreadyDone) {
+      await updateScore(locked, userId, client);
+    }
+    await checkMissionCompletion({ ...mission, ...locked }, userId, client);
+    await client.query('COMMIT');
+
+    return {
+      status: 201,
+      body: {
+        checkin: withDifficultFlag(checkinRes.rows[0]),
+        day: dayNumber,
+        already_done: alreadyDone,
+        message: checkinMessage(dayNumber, alreadyDone)
+      }
+    };
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+      // A sessão pode já ter sido desfeita.
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function streakSummary(mission, userId) {
+  const todayDay = await missionDayNumber(mission, userId);
+  const safeToday = Number.isInteger(todayDay) ? todayDay : 0;
+
+  const result = await db.query(
+    `SELECT day_number, completed, is_difficult
+     FROM checkins
+     WHERE mission_id = $1 AND user_id = $2
+     ORDER BY day_number ASC`,
+    [mission.id, userId]
+  );
+
+  const doneDays = new Set(
+    result.rows.filter(row => row.completed === true).map(row => row.day_number)
+  );
+  const difficultDays = result.rows
+    .filter(row => isDifficultDay(row))
+    .map(row => row.day_number)
+    .sort((left, right) => left - right);
+
+  let streak = 0;
+  for (let d = safeToday; d >= 1; d--) {
+    if (doneDays.has(d)) streak++;
+    else break;
+  }
+
+  const { brio, consistency, recovered } = calculateBrio(doneDays, Math.max(safeToday, 1), streak);
+  const recovery = calculateRecoveryState(doneDays, safeToday);
+
+  return {
+    streak,
+    total: doneDays.size,
+    today_done: doneDays.has(safeToday),
+    brio,
+    consistency,
+    recovered,
+    ...recovery,
+    difficult_days_used: difficultDays.length,
+    difficult_days_remaining: Math.max(0, DIFFICULT_DAY_LIMIT - difficultDays.length),
+    difficult_days: difficultDays
+  };
+}
+
 // ============================================
 // CALCULAR SEQUÊNCIA REAL
 // GET /api/checkins/:missionId/streak
@@ -293,102 +452,8 @@ router.get('/:missionId/streak', auth, async (req, res) => {
     const mission = missionRes.rows[0];
     if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
 
-    const started   = new Date(mission.started_at);
-    const today     = new Date();
-    const todayDay  = Math.floor((today - started) / (1000 * 60 * 60 * 24)) + 1;
-
-    // Buscar todos os check-ins do utilizador nesta missão
-    const result = await db.query(
-      `SELECT day_number FROM checkins
-       WHERE mission_id = $1 AND user_id = $2 AND completed = true
-       ORDER BY day_number DESC`,
-      [mission.id, userId]
-    );
-
-    const doneDays = new Set(result.rows.map(r => r.day_number));
-
-    // Calcular sequência a partir de hoje para trás
-    let streak = 0;
-    for (let d = todayDay; d >= 1; d--) {
-      if (doneDays.has(d)) {
-        streak++;
-      } else {
-        break;
-      }
-    }
-
-    // Total de dias completados
-    const total = doneDays.size;
-    const { brio, consistency, recovered } = calculateBrio(doneDays, todayDay, streak);
-    const recovery = calculateRecoveryState(doneDays, todayDay);
-
-    res.json({
-      streak,
-      total,
-      today_done: doneDays.has(todayDay),
-      brio,
-      consistency,
-      recovered,
-      ...recovery
-    });
-  } catch(err) {
-    res.status(500).json({ error: 'Erro ao calcular sequência.' });
-  }
-});
-
-async function updateScore(mission, userId, db) {
-  const field = mission.user_id === userId ? 'user_score' : 'partner_score';
-  await db.query(`UPDATE missions SET ${field} = ${field} + 1 WHERE id = $1`, [mission.id]);
-}
-
-// ============================================
-// SEQUÊNCIA REAL
-// GET /api/checkins/:missionId/streak
-// ============================================
-router.get('/:missionId/streak', auth, async (req, res) => {
-  const userId = req.user.userId;
-  try {
-    const missionRes = await db.query(
-      `SELECT * FROM missions m
-       WHERE id = $1
-         AND ${missionParticipantWhere('m', '$2')}`,
-      [req.params.missionId, userId]
-    );
-    const mission = missionRes.rows[0];
-    if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
-
-    const started  = new Date(mission.started_at);
-    const today    = new Date();
-    const todayDay = Math.floor((today - started) / (1000 * 60 * 60 * 24)) + 1;
-
-    const result = await db.query(
-      `SELECT day_number FROM checkins
-       WHERE mission_id = $1 AND user_id = $2 AND completed = true
-       ORDER BY day_number DESC`,
-      [mission.id, userId]
-    );
-
-    const doneDays = new Set(result.rows.map(r => r.day_number));
-
-    // Calcular sequência consecutiva a partir de hoje para trás
-    let streak = 0;
-    for (let d = todayDay; d >= 1; d--) {
-      if (doneDays.has(d)) streak++;
-      else break;
-    }
-
-    const { brio, consistency, recovered } = calculateBrio(doneDays, todayDay, streak);
-    const recovery = calculateRecoveryState(doneDays, todayDay);
-    res.json({
-      streak,
-      total: doneDays.size,
-      today_done: doneDays.has(todayDay),
-      brio,
-      consistency,
-      recovered,
-      ...recovery
-    });
-  } catch(err) {
+    res.json(await streakSummary(mission, userId));
+  } catch (err) {
     res.status(500).json({ error: 'Erro ao calcular sequência.' });
   }
 });

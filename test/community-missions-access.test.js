@@ -93,6 +93,11 @@ function handleQuery(sql, params = []) {
     return { rows: row ? [{ ...row }] : [] };
   }
 
+  if (/FROM missions\b/i.test(text) && /FOR UPDATE/i.test(text)) {
+    const mission = state.missions.find((item) => Number(item.id) === Number(params[0]));
+    return { rows: mission ? [{ ...mission }] : [] };
+  }
+
   if (/FROM missions m\b/i.test(text)) {
     const mission = state.missions.find((item) => Number(item.id) === Number(params[0]));
     if (!mission) return { rows: [] };
@@ -183,6 +188,10 @@ async function request(method, path, { token, body } = {}) {
 describe('acesso a missão de comunidade', { concurrency: 1 }, () => {
   before(async () => {
     mock.method(Pool.prototype, 'query', (sql, params) => handleQuery(sql, params));
+    mock.method(Pool.prototype, 'connect', () => ({
+      query: (sql, params) => handleQuery(sql, params),
+      release() {}
+    }));
     await new Promise((resolve) => {
       server = http.createServer(app).listen(0, '127.0.0.1', resolve);
     });

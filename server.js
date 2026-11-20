@@ -6,6 +6,7 @@
 const express = require('express');
 const cors    = require('cors');
 const { buildAllowedOrigins } = require('./lib/allowed-origins');
+const { errorHandler } = require('./lib/error-handler');
 require('dotenv').config();
 
 const app  = express();
@@ -98,10 +99,7 @@ app.use('/api/community-missions', communityMissionRoutes);
 // TRATAMENTO DE ERROS
 // Se algo correr mal, devolve uma mensagem clara
 // ============================================
-app.use((err, req, res, next) => {
-  console.error('Erro:', err.message);
-  res.status(500).json({ error: 'Algo correu mal no servidor.' });
-});
+app.use(errorHandler);
 
 // ============================================
 // INICIAR O SERVIDOR

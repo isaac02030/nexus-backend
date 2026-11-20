@@ -11,6 +11,7 @@ const {
   validateDifficultDay
 } = require('../lib/difficult-days');
 const { calculateRecoveryState } = require('../lib/recovery-state');
+const { classifyNote } = require('../lib/crisis-filter');
 const {
   getLegacyMissionDayNumber,
   getMissionDayNumber,
@@ -115,13 +116,27 @@ function calculateBrio(doneDays, todayDay, streak) {
   return { brio, consistency, recovered: recoveredAfterMiss };
 }
 
+// Campos de crise que vão em TODA resposta deste pedido quando o filtro
+// dispara (sucesso ou erro), para o site abrir a tela de ajuda.
+// Sem disparo, a resposta fica igual à de antes.
+function crisisFields(level) {
+  return level ? { crisis: true, crisis_level: level } : {};
+}
+
 router.post('/', auth, async (req, res) => {
-  const { mission_id, note, difficult } = req.body;
+  const { mission_id, difficult } = req.body;
   const userId = req.user.userId;
   const wantsDifficult = difficult === true;
 
+  // Filtro de crise antes de tudo. Se dispara, a nota é descartada aqui:
+  // não vai para o banco, nem para log, nem para a IA (que lê do banco).
+  // O check-in segue sem penalidade e sem exigir a prova escrita.
+  const crisisLevel = classifyNote(req.body.note);
+  const note = crisisLevel ? null : req.body.note;
+  const reply = (status, body) => res.status(status).json({ ...body, ...crisisFields(crisisLevel) });
+
   if (!mission_id) {
-    return res.status(400).json({ error: 'mission_id é obrigatório.' });
+    return reply(400, { error: 'mission_id é obrigatório.' });
   }
 
   try {
@@ -133,21 +148,22 @@ router.post('/', auth, async (req, res) => {
     );
 
     const mission = missionRes.rows[0];
-    if (!mission) return res.status(404).json({ error: 'Missão não encontrada.' });
-    if (mission.status !== 'active') return res.status(400).json({ error: 'Missão não está ativa.' });
-    const proofError = getProofValidation(mission.proof_mode, note);
+    if (!mission) return reply(404, { error: 'Missão não encontrada.' });
+    if (mission.status !== 'active') return reply(400, { error: 'Missão não está ativa.' });
+    const proofError = crisisLevel ? null : getProofValidation(mission.proof_mode, note);
     if (proofError) {
-      return res.status(400).json({ error: proofError });
+      return reply(400, { error: proofError });
     }
 
     // Comum e difícil usam a mesma transação e a mesma trava da missão.
     // O dia é calculado depois da trava, para dois pedidos não somarem
     // o ponto duas vezes nem passarem de 4 ou de 2 seguidos.
     const recorded = await recordCheckin({ mission, userId, note, wantsDifficult });
-    return res.status(recorded.status).json(recorded.body);
+    return reply(recorded.status, recorded.body);
 
   } catch (err) {
-    res.status(500).json({ error: 'Erro ao registar check-in.' });
+    // Sem log do erro aqui: nada do pedido (nem a nota) vai para o console.
+    reply(500, { error: 'Erro ao registar check-in.' });
   }
 });
 

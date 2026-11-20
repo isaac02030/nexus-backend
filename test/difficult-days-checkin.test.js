@@ -39,6 +39,7 @@ function createSimulator() {
     nextId: 1,
     txSeq: 0,
     connects: 0,
+    trace: [],
     hooks: {}
   };
 
@@ -74,6 +75,9 @@ function createSimulator() {
     if (!lock) {
       state.locks.set(key, { owner: tx, queue: [] });
       tx.held.add(key);
+      if (String(key).startsWith('mission:') && state.hooks.afterLockAcquired) {
+        await state.hooks.afterLockAcquired(tx, key);
+      }
       return;
     }
     if (lock.owner === tx) return;
@@ -82,6 +86,9 @@ function createSimulator() {
       if (state.hooks.onLockWait) state.hooks.onLockWait(tx, key);
     });
     tx.held.add(key);
+    if (String(key).startsWith('mission:') && state.hooks.afterLockAcquired) {
+      await state.hooks.afterLockAcquired(tx, key);
+    }
   }
 
   function releaseLocks(tx) {
@@ -151,6 +158,7 @@ function createSimulator() {
 
   async function query(sql, params = [], tx = null) {
     const text = normalize(sql);
+    state.trace.push({ tx: tx ? tx.id : null, text });
 
     if (text === 'BEGIN') return { rows: [], rowCount: 0 };
     if (text === 'COMMIT') {
@@ -179,7 +187,7 @@ function createSimulator() {
     }
 
     if (/^INSERT INTO checkins/i.test(text)) {
-      const difficult = /is_difficult/i.test(text);
+      const wantsDifficult = params[4] === true;
       const incoming = {
         id: state.nextId,
         mission_id: Number(params[0]),
@@ -187,7 +195,7 @@ function createSimulator() {
         day_number: Number(params[2]),
         completed: true,
         note: params[3] || null,
-        is_difficult: difficult,
+        is_difficult: wantsDifficult,
         created_at: new Date().toISOString()
       };
       const existing = readCheckins(tx).find(row => checkinKey(row) === checkinKey(incoming));
@@ -196,7 +204,7 @@ function createSimulator() {
           ...existing,
           completed: true,
           note: incoming.note,
-          is_difficult: difficult ? existing.is_difficult === true || true : existing.is_difficult === true
+          is_difficult: existing.is_difficult === true || wantsDifficult
         }
         : incoming;
       if (!existing) state.nextId += 1;
@@ -291,10 +299,12 @@ function createSimulator() {
       state.locks.clear();
       state.nextId = 1;
       state.connects = 0;
+      state.trace = [];
       state.hooks.onLockWait = null;
       state.hooks.onCommit = null;
       state.hooks.onRollback = null;
       state.hooks.afterDifficultRead = null;
+      state.hooks.afterLockAcquired = null;
     },
     connect() {
       state.connects += 1;
@@ -430,6 +440,35 @@ function armRace() {
   simulator.state.hooks.onLockWait = () => releaseFirst();
   simulator.state.hooks.onCommit = () => timeline.push('commit');
   simulator.state.hooks.onRollback = () => timeline.push('rollback');
+  return timeline;
+}
+
+function armLockRace() {
+  const timeline = [];
+  let missionLocks = 0;
+  let releaseFirst;
+  const secondBlocked = new Promise(resolve => {
+    releaseFirst = resolve;
+  });
+
+  simulator.state.hooks.afterLockAcquired = async (tx, key) => {
+    if (!String(key).startsWith('mission:')) return;
+    missionLocks += 1;
+    timeline.push(`lock${missionLocks}`);
+    if (missionLocks === 1) {
+      const waited = await Promise.race([
+        secondBlocked.then(() => 'blocked'),
+        new Promise(resolve => setTimeout(() => resolve('timeout'), 1500))
+      ]);
+      assert.equal(waited, 'blocked', 'o outro pedido tem de esperar a trava da missão');
+    }
+  };
+  simulator.state.hooks.onLockWait = (tx, key) => {
+    if (!String(key).startsWith('mission:')) return;
+    timeline.push('wait');
+    releaseFirst();
+  };
+  simulator.state.hooks.onCommit = () => timeline.push('commit');
   return timeline;
 }
 
@@ -714,6 +753,72 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
     assert.deepEqual(difficultDays(41, 1), [1, 2]);
     assert.equal(simulator.state.missions.get(41).user_score, 0);
     assert.deepEqual(timeline.slice(0, 3), ['read1', 'rollback', 'read2']);
+  });
+
+  test('os dias 5 e 7 difíceis bloqueiam o 6, e o dia é calculado depois da trava', async () => {
+    simulator.reset();
+    putUser(user(1));
+    putMission(mission({
+      id: 43,
+      partner_id: null,
+      partner_name: null,
+      mode: 'solo',
+      started_at: startedForLegacyDay(6)
+    }));
+    seedCheckin({ mission_id: 43, user_id: 1, day_number: 5, is_difficult: true });
+    seedCheckin({ mission_id: 43, user_id: 1, day_number: 7, is_difficult: true });
+
+    const blocked = await request('POST', '/api/checkins', {
+      token: tokenFor(1),
+      body: { mission_id: 43, difficult: true }
+    });
+
+    assert.equal(blocked.status, 400);
+    assert.equal(blocked.body.error, DIFFICULT_CONSECUTIVE_MESSAGE);
+    assert.equal(blocked.body.day, undefined);
+    assert.deepEqual(difficultDays(43, 1), [5, 7]);
+    assert.equal(simulator.state.checkins.some(row => row.day_number === 6), false);
+
+    const trace = simulator.state.trace.filter(entry => entry.tx != null).map(entry => entry.text);
+    const missionLock = trace.findIndex(text => /FOR UPDATE/i.test(text) && /FROM missions/i.test(text));
+    const clock = trace.findIndex(text => /reminder_time/i.test(text));
+    const counted = trace.findIndex(text => /is_difficult = true/i.test(text));
+    assert.ok(missionLock >= 0 && clock > missionLock && counted > clock);
+  });
+
+  test('um check-in comum e um difícil ao mesmo tempo não dobram o ponto', async () => {
+    simulator.reset();
+    putUser(user(1));
+    putMission(mission({
+      id: 42,
+      partner_id: null,
+      partner_name: null,
+      mode: 'solo',
+      started_at: startedForLegacyDay(1)
+    }));
+    const timeline = armLockRace();
+
+    const [plain, difficult] = await Promise.all([
+      request('POST', '/api/checkins', {
+        token: tokenFor(1),
+        body: { mission_id: 42 }
+      }),
+      request('POST', '/api/checkins', {
+        token: tokenFor(1),
+        body: { mission_id: 42, difficult: true }
+      })
+    ]);
+
+    assert.equal(plain.status, 201);
+    assert.equal(difficult.status, 201);
+    const bodies = [plain.body, difficult.body];
+    assert.equal(bodies.filter(body => body.already_done === false).length, 1);
+    assert.equal(bodies.filter(body => body.already_done === true).length, 1);
+    assert.equal(simulator.state.checkins.filter(row => row.mission_id === 42).length, 1);
+    assert.equal(simulator.state.checkins[0].is_difficult, true);
+    assert.equal(simulator.state.checkins[0].completed, true);
+    assert.equal(simulator.state.missions.get(42).user_score, 1);
+    assert.deepEqual(timeline.slice(0, 4), ['lock1', 'wait', 'commit', 'lock2']);
   });
 
   test('perto da meia-noite o dia do check-in segue o fuso da pessoa', async () => {

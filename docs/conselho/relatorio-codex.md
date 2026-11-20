@@ -74,5 +74,6 @@
 - A contagem e a gravação do dia difícil ficam na mesma transação, com `SELECT ... FOR UPDATE` na missão.
 - O número do dia do check-in usa o fuso da pessoa quando o horário do aviso também está escolhido. Fuso vazio continua no relógio do servidor.
 - Migração `003_checkin_difficult_day.sql` só acrescenta `is_difficult`, padrão falso. A ordem no `database.sql` é 001, 002, 003.
-- `node --test`: 48 passaram, 1 pulado (o Postgres real do lembrete, que não rodou).
+- `node --test`: 51 passaram, 1 pulado (o Postgres real do lembrete, que não rodou).
+- A janela de dias seguidos olha os dois lados. O dia do check-in é calculado depois da trava. O check-in comum usa a mesma transação do dia difícil.
 - Nada foi mesclado em `main`. O PR 3 antigo permanece aberto.

@@ -42,6 +42,24 @@ test('bloqueia o terceiro dia seguido e aceita outro depois de um intervalo', ()
   assert.equal(validateDifficultDay({ difficultDays: [1, 2, 4], dayNumber: 5 }).ok, true);
 });
 
+test('o dia novo não forma 3 seguidos com vizinhos dos dois lados', () => {
+  const between = validateDifficultDay({ difficultDays: [5, 7], dayNumber: 6 });
+  assert.equal(between.ok, false);
+  assert.equal(between.error, DIFFICULT_CONSECUTIVE_MESSAGE);
+
+  const beforePair = validateDifficultDay({ difficultDays: [6, 7], dayNumber: 5 });
+  assert.equal(beforePair.ok, false);
+  assert.equal(beforePair.error, DIFFICULT_CONSECUTIVE_MESSAGE);
+
+  const afterPair = validateDifficultDay({ difficultDays: [1, 2], dayNumber: 3 });
+  assert.equal(afterPair.ok, false);
+  assert.equal(afterPair.error, DIFFICULT_CONSECUTIVE_MESSAGE);
+
+  assert.equal(validateDifficultDay({ difficultDays: [5], dayNumber: 6 }).ok, true);
+  assert.equal(validateDifficultDay({ difficultDays: [7], dayNumber: 6 }).ok, true);
+  assert.equal(validateDifficultDay({ difficultDays: [5, 8], dayNumber: 6 }).ok, true);
+});
+
 test('o dia de hoje não entra de novo na conta', () => {
   const again = validateDifficultDay({
     difficultDays: [1, 3, 5, 7],

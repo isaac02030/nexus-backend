@@ -140,53 +140,11 @@ router.post('/', auth, async (req, res) => {
       return res.status(400).json({ error: proofError });
     }
 
-    const dayNumber = await missionDayNumber(mission, userId);
-
-    if (!Number.isInteger(dayNumber) || dayNumber < 1) {
-      return res.status(400).json({ error: 'A missão ainda não começou.' });
-    }
-    if (dayNumber > mission.duration_days) {
-      return res.status(400).json({ error: 'A missão já terminou.' });
-    }
-
-    // Dia difícil: a contagem e a gravação ficam na mesma transação, com a
-    // missão travada, para dois pedidos ao mesmo tempo não passarem de 4
-    // nem de 2 seguidos. A prova do contrato já foi conferida acima.
-    if (wantsDifficult) {
-      const recorded = await recordDifficultCheckin({ mission, userId, dayNumber, note });
-      return res.status(recorded.status).json(recorded.body);
-    }
-
-    // Verificar se já fez check-in hoje
-    const existing = await db.query(
-      `SELECT * FROM checkins WHERE mission_id = $1 AND user_id = $2 AND day_number = $3`,
-      [mission_id, userId, dayNumber]
-    );
-    const alreadyDone = existing.rows.length > 0 && existing.rows[0].completed === true;
-
-    // Registar o check-in
-    const checkinRes = await db.query(
-      `INSERT INTO checkins (mission_id, user_id, day_number, completed, note)
-       VALUES ($1, $2, $3, true, $4)
-       ON CONFLICT (mission_id, user_id, day_number)
-       DO UPDATE SET completed = true, note = $4
-       RETURNING *`,
-      [mission_id, userId, dayNumber, note || null]
-    );
-
-    // Só incrementar pontuação se for a primeira vez hoje
-    if (!alreadyDone) {
-      await updateScore(mission, userId, db);
-    }
-
-    await checkMissionCompletion(mission, userId, db);
-
-    res.status(201).json({
-      checkin: withDifficultFlag(checkinRes.rows[0]),
-      day: dayNumber,
-      already_done: alreadyDone,
-      message: alreadyDone ? `Dia ${dayNumber} já estava registado!` : `Dia ${dayNumber} registado! 🔥`
-    });
+    // Comum e difícil usam a mesma transação e a mesma trava da missão.
+    // O dia é calculado depois da trava, para dois pedidos não somarem
+    // o ponto duas vezes nem passarem de 4 ou de 2 seguidos.
+    const recorded = await recordCheckin({ mission, userId, note, wantsDifficult });
+    return res.status(recorded.status).json(recorded.body);
 
   } catch (err) {
     res.status(500).json({ error: 'Erro ao registar check-in.' });
@@ -333,15 +291,15 @@ function checkinMessage(dayNumber, alreadyDone) {
   return alreadyDone ? `Dia ${dayNumber} já estava registado!` : `Dia ${dayNumber} registado! 🔥`;
 }
 
-// Trava a missão, conta os dias difíceis desta pessoa e grava o check-in
-// antes de soltar a trava. A cota é por pessoa, não da dupla inteira.
-async function recordDifficultCheckin({ mission, userId, dayNumber, note }) {
+// Trava a missão, calcula o dia e grava o check-in antes de soltar a trava.
+// Vale para o dia comum e para o difícil. A cota difícil é por pessoa.
+async function recordCheckin({ mission, userId, note, wantsDifficult }) {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
 
     const lockedRes = await client.query(
-      `SELECT id, user_id, partner_id, status, duration_days
+      `SELECT id, user_id, partner_id, status, duration_days, started_at
        FROM missions
        WHERE id = $1
        FOR UPDATE`,
@@ -360,20 +318,32 @@ async function recordDifficultCheckin({ mission, userId, dayNumber, note }) {
       return { status: 400, body: { error: 'Missão não está ativa.' } };
     }
 
-    const difficultRes = await client.query(
-      `SELECT day_number
-       FROM checkins
-       WHERE mission_id = $1 AND user_id = $2 AND is_difficult = true
-       FOR UPDATE`,
-      [mission.id, userId]
-    );
-    const decision = validateDifficultDay({
-      difficultDays: difficultRes.rows.map(row => row.day_number),
-      dayNumber
-    });
-    if (!decision.ok) {
+    const dayNumber = await missionDayNumber(locked, userId, client);
+    if (!Number.isInteger(dayNumber) || dayNumber < 1) {
       await client.query('ROLLBACK');
-      return { status: 400, body: { error: decision.error } };
+      return { status: 400, body: { error: 'A missão ainda não começou.' } };
+    }
+    if (dayNumber > locked.duration_days) {
+      await client.query('ROLLBACK');
+      return { status: 400, body: { error: 'A missão já terminou.' } };
+    }
+
+    if (wantsDifficult) {
+      const difficultRes = await client.query(
+        `SELECT day_number
+         FROM checkins
+         WHERE mission_id = $1 AND user_id = $2 AND is_difficult = true
+         FOR UPDATE`,
+        [mission.id, userId]
+      );
+      const decision = validateDifficultDay({
+        difficultDays: difficultRes.rows.map(row => row.day_number),
+        dayNumber
+      });
+      if (!decision.ok) {
+        await client.query('ROLLBACK');
+        return { status: 400, body: { error: decision.error } };
+      }
     }
 
     const existing = await client.query(
@@ -387,13 +357,13 @@ async function recordDifficultCheckin({ mission, userId, dayNumber, note }) {
 
     const checkinRes = await client.query(
       `INSERT INTO checkins (mission_id, user_id, day_number, completed, note, is_difficult)
-       VALUES ($1, $2, $3, true, $4, true)
+       VALUES ($1, $2, $3, true, $4, $5)
        ON CONFLICT (mission_id, user_id, day_number)
        DO UPDATE SET completed = true,
                      note = $4,
                      is_difficult = checkins.is_difficult OR EXCLUDED.is_difficult
        RETURNING *`,
-      [mission.id, userId, dayNumber, note || null]
+      [mission.id, userId, dayNumber, note || null, wantsDifficult]
     );
 
     if (!alreadyDone) {

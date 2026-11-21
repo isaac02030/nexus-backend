@@ -204,7 +204,8 @@ function createSimulator() {
         ? {
           ...existing,
           completed: true,
-          note: incoming.note,
+          // Igual ao SQL: CASE WHEN $6 THEN NULL ELSE COALESCE($4, checkins.note) END
+          note: params[5] === true ? null : (incoming.note ?? existing.note ?? null),
           is_difficult: existing.is_difficult === true || wantsDifficult
         }
         : incoming;
@@ -755,6 +756,82 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
       assert.deepEqual(res.body, { error: 'Missão não encontrada.' });
     }
     assert.equal(simulator.state.checkins.length, 0);
+  });
+
+  test('dia difícil sem frase não apaga a nota que já existia no dia', async () => {
+    simulator.reset();
+    putUser(user(1));
+    putMission(mission({
+      id: 36,
+      partner_id: null,
+      partner_name: null,
+      mode: 'solo',
+      started_at: startedForLegacyDay(1)
+    }));
+
+    const plain = await request('POST', '/api/checkins', {
+      token: tokenFor(1),
+      body: { mission_id: 36, note: 'li duas páginas' }
+    });
+    const difficult = await request('POST', '/api/checkins', {
+      token: tokenFor(1),
+      body: { mission_id: 36, difficult: true, minimum_done: true, note: '' }
+    });
+
+    assert.equal(plain.status, 201);
+    assert.equal(difficult.status, 201);
+    assert.equal(simulator.state.checkins.length, 1);
+    assert.equal(simulator.state.checkins[0].note, 'li duas páginas');
+    assert.equal(simulator.state.checkins[0].is_difficult, true);
+    const upsert = simulator.state.trace.find(item => /^INSERT INTO checkins/i.test(item.text));
+    assert.match(upsert.text, /note = CASE WHEN \$6 THEN NULL ELSE COALESCE\(\$4, checkins\.note\) END/);
+  });
+
+  test('crise ao repetir o dia apaga a nota anterior e não grava a nova', async () => {
+    simulator.reset();
+    putUser(user(1));
+    putMission(mission({
+      id: 37,
+      partner_id: null,
+      partner_name: null,
+      mode: 'solo',
+      started_at: startedForLegacyDay(1)
+    }));
+
+    await request('POST', '/api/checkins', {
+      token: tokenFor(1),
+      body: { mission_id: 37, note: 'li duas páginas' }
+    });
+    const crisis = await request('POST', '/api/checkins', {
+      token: tokenFor(1),
+      body: { mission_id: 37, difficult: true, minimum_done: true, note: 'hoje eu so quero morrer' }
+    });
+
+    assert.equal(crisis.status, 201);
+    assert.equal(crisis.body.crisis, true);
+    assert.equal(crisis.body.checkin.note, null);
+    assert.equal(simulator.state.checkins.length, 1);
+    assert.equal(simulator.state.checkins[0].note, null);
+    assert.equal(simulator.state.checkins[0].is_difficult, true);
+  });
+
+  test('frase nova sem crise substitui a nota do dia', async () => {
+    simulator.reset();
+    putUser(user(1));
+    putMission(mission({
+      id: 38,
+      partner_id: null,
+      partner_name: null,
+      mode: 'solo',
+      started_at: startedForLegacyDay(1)
+    }));
+
+    await request('POST', '/api/checkins', { token: tokenFor(1), body: { mission_id: 38, note: 'primeira' } });
+    await request('POST', '/api/checkins', {
+      token: tokenFor(1),
+      body: { mission_id: 38, difficult: true, minimum_done: true, note: 'segunda frase' }
+    });
+    assert.equal(simulator.state.checkins[0].note, 'segunda frase');
   });
 
   test('repetir o dia sem a marca difícil não apaga a marca', async () => {

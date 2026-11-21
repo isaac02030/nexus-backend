@@ -264,6 +264,11 @@ router.post('/:slug/:missionId/checkin', auth, async (req, res) => {
     const alreadyDone = existing.rows.length > 0;
 
     if (!alreadyDone) {
+      // [BUG CONHECIDO, precisa de migração] checkins.mission_id aponta para
+      // missions(id), não para community_missions(id). Se não houver missão
+      // pessoal com este id, o banco recusa (chave estrangeira) e a rota dá 500.
+      // Se houver, o check-in cai na missão pessoal de outra pessoa.
+      // Não usar esta rota com testers até ela ter tabela própria.
       // Registar check-in
       await db.query(
         `INSERT INTO checkins (mission_id, user_id, day_number, completed)
@@ -294,8 +299,10 @@ router.post('/:slug/:missionId/checkin', auth, async (req, res) => {
 });
 
 // ============================================
-// RANKING DE UMA MISSÃO INTERNA
+// RANKING DE UMA MISSÃO INTERNA (solo, duo ou maratona)
 // GET /api/community-missions/:slug/:missionId/ranking?scope=mundial|regional|local
+// Única rota de ranking: antes havia 4 cópias, e o Express só usava esta,
+// a primeira registrada. As outras nunca respondiam.
 // ============================================
 router.get('/:slug/:missionId/ranking', auth, async (req, res) => {
   const userId = req.user.userId;
@@ -338,55 +345,9 @@ router.get('/:slug/:missionId/ranking', auth, async (req, res) => {
 });
 
 // ============================================
-// RANKING POR SCOPE
-// GET /api/community-missions/:slug/:missionId/ranking?scope=mundial
-// ============================================
-router.get('/:slug/:missionId/ranking', auth, async (req, res) => {
-  const { scope } = req.query; // mundial, regional, local
-
-  try {
-    if (!await findCommunityMissionForParticipant(req.params.missionId, req.user.userId)) {
-      return res.status(404).json({ error: 'Missão não encontrada.' });
-    }
-
-    let query = `
-      SELECT cmp.score, cmp.completed, u.username,
-        ROW_NUMBER() OVER (ORDER BY cmp.score DESC) AS position
-       FROM community_mission_participants cmp
-       JOIN users u ON cmp.user_id = u.id
-       WHERE cmp.community_mission_id = $1`;
-
-    const params = [req.params.missionId];
-
-    // Filtrar por scope se pedido
-    // Por agora scope é guardado na missão — filtramos participantes da região
-    // Futuramente: usar localização do utilizador
-    // Por agora devolvemos todos mas com label do scope
-
-    query += ' ORDER BY cmp.score DESC LIMIT 50';
-
-    const result = await db.query(query, params);
-
-    // Buscar info da missão para scope
-    const missionRes = await db.query(
-      'SELECT scope FROM community_missions WHERE id = $1',
-      [req.params.missionId]
-    );
-    const missionScope = missionRes.rows[0]?.scope || 'mundial';
-
-    res.json({
-      ranking: result.rows,
-      scope: scope || missionScope,
-      total: result.rows.length
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Erro ao obter ranking.' });
-  }
-});
-
-// ============================================
 // LISTAR MISSÕES MARATONA POR SCOPE
 // GET /api/community-missions/:slug/scope/:scope
+// Única rota de scope: a cópia de baixo nunca respondia.
 // ============================================
 router.get('/:slug/scope/:scope', auth, async (req, res) => {
   const userId = req.user.userId;
@@ -419,92 +380,6 @@ router.get('/:slug/scope/:scope', auth, async (req, res) => {
     res.json({ missions: result.rows, scope });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao listar missões.' });
-  }
-});
-
-// ============================================
-// RANKING DE UMA MISSÃO MARATONA
-// GET /api/community-missions/:slug/:missionId/ranking
-// ============================================
-router.get('/:slug/:missionId/ranking', auth, async (req, res) => {
-  try {
-    if (!await findCommunityMissionForParticipant(req.params.missionId, req.user.userId)) {
-      return res.status(404).json({ error: 'Missão não encontrada.' });
-    }
-
-    const result = await db.query(
-      `SELECT cmp.score, cmp.completed, u.username,
-        ROW_NUMBER() OVER (ORDER BY cmp.score DESC) AS position
-       FROM community_mission_participants cmp
-       JOIN users u ON cmp.user_id = u.id
-       WHERE cmp.community_mission_id = $1
-       ORDER BY cmp.score DESC`,
-      [req.params.missionId]
-    );
-    res.json({ ranking: result.rows });
-  } catch (err) {
-    res.status(500).json({ error: 'Erro ao obter ranking.' });
-  }
-});
-
-// ============================================
-// RANKING DE UMA MISSÃO INTERNA (com posição do utilizador)
-// GET /api/community-missions/:slug/:missionId/ranking
-// ============================================
-router.get('/:slug/:missionId/ranking', auth, async (req, res) => {
-  const userId = req.user.userId;
-  try {
-    if (!await findCommunityMissionForParticipant(req.params.missionId, userId)) {
-      return res.status(404).json({ error: 'Missão não encontrada.' });
-    }
-
-    const result = await db.query(
-      `SELECT cmp.score, cmp.completed, u.id AS user_id, u.username,
-        ROW_NUMBER() OVER (ORDER BY cmp.score DESC) AS position
-       FROM community_mission_participants cmp
-       JOIN users u ON cmp.user_id = u.id
-       WHERE cmp.community_mission_id = $1
-       ORDER BY cmp.score DESC`,
-      [req.params.missionId]
-    );
-    const myEntry = result.rows.find(r => r.user_id === userId);
-    res.json({ ranking: result.rows, my_position: myEntry ? parseInt(myEntry.position) : null });
-  } catch (err) {
-    res.status(500).json({ error: 'Erro ao obter ranking.' });
-  }
-});
-
-// ============================================
-// MISSÕES MARATONA POR SCOPE
-// GET /api/community-missions/:slug/scope/:scope
-// ============================================
-router.get('/:slug/scope/:scope', auth, async (req, res) => {
-  const userId = req.user.userId;
-  const { slug, scope } = req.params;
-  try {
-    const commRes = await db.query('SELECT * FROM communities WHERE slug = $1', [slug]);
-    const community = commRes.rows[0];
-    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
-
-    const result = await db.query(
-      `SELECT cm.*,
-        u.username AS creator_name,
-        COUNT(DISTINCT cmp.id) AS participant_count,
-        CASE WHEN EXISTS(
-          SELECT 1 FROM community_mission_participants
-          WHERE community_mission_id = cm.id AND user_id = $1
-        ) THEN true ELSE false END AS is_participant
-       FROM community_missions cm
-       LEFT JOIN users u ON cm.created_by = u.id
-       LEFT JOIN community_mission_participants cmp ON cm.id = cmp.community_mission_id
-       WHERE cm.community_id = $2 AND cm.mode = 'maratona' AND cm.scope = $3
-       GROUP BY cm.id, u.username
-       ORDER BY participant_count DESC, cm.created_at DESC`,
-      [userId, community.id, scope]
-    );
-    res.json({ missions: result.rows, scope });
-  } catch (err) {
-    res.status(500).json({ error: 'Erro ao listar missões por scope.' });
   }
 });
 

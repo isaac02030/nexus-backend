@@ -6,9 +6,26 @@
 const express  = require('express');
 const { Pool } = require('pg');
 const auth     = require('../middleware/auth');
+const { classifyNote } = require('../lib/crisis-filter');
+const { NOTE_MAX_CHARS, noteLength } = require('../lib/note-limit');
 const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// Posts do fórum: mesmo limite de tamanho da frase do check-in (280
+// caracteres reais) e no máximo 3 posts por pessoa a cada 24 horas,
+// somando todas as comunidades.
+const POST_MAX_CHARS = NOTE_MAX_CHARS;
+const POSTS_PER_DAY = 3;
+
+const POST_CRISIS_MESSAGE = 'Seu post não foi publicado. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const POST_NOT_TEXT_MESSAGE = 'O post precisa ser um texto. Escreva de novo e envie.';
+const POST_EMPTY_MESSAGE = 'O post está vazio. Escreva alguma coisa e envie.';
+const POST_TOO_LONG_MESSAGE = `O post passou de ${POST_MAX_CHARS} caracteres. Encurte um pouco e envie de novo.`;
+const POST_NOT_MEMBER_MESSAGE = 'Só membros desta comunidade podem publicar. Entre na comunidade e tente de novo.';
+const POST_LOCKED_MESSAGE = 'Para publicar aqui, conclua primeiro uma missão desta categoria.';
+const POST_RATE_LIMIT_MESSAGE = `Você já publicou ${POSTS_PER_DAY} posts nas últimas 24 horas. Tente de novo amanhã.`;
+const POST_SERVER_ERROR_MESSAGE = 'Não deu para publicar agora. Tente de novo daqui a pouco.';
 
 const CATEGORY_PROGRESS_SELECT = `
   COALESCE((
@@ -85,176 +102,9 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-// ============================================
-// VER COMUNIDADE
-// GET /api/communities/:slug
-// ============================================
-router.get('/:slug', auth, async (req, res) => {
-  const userId = req.user.userId;
-  try {
-    const commRes = await db.query(
-      `SELECT c.*,
-        CASE WHEN cm.user_id IS NOT NULL THEN true ELSE false END AS is_member,
-        cm.rank AS my_rank,
-        ${CATEGORY_PROGRESS_SELECT}
-       FROM communities c
-       LEFT JOIN community_members cm
-         ON cm.community_id = c.id AND cm.user_id = $1
-       WHERE c.slug = $2`,
-      [userId, req.params.slug]
-    );
-
-    const community = commRes.rows[0];
-    const access = community ? getCommunityAccess(community) : null;
-    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
-
-    // Top 10 ranking
-    const rankRes = await db.query(
-      `SELECT cm.rank, cm.missions_done, cm.total_days, u.username
-       FROM community_members cm
-       JOIN users u ON cm.user_id = u.id
-       WHERE cm.community_id = $1
-       ORDER BY cm.missions_done DESC, cm.total_days DESC
-       LIMIT 10`,
-      [community.id]
-    );
-
-    // Posts recentes
-    let posts = [];
-    if (access.can_read_forum) {
-      const postsRes = await db.query(
-        `SELECT cp.*, u.username
-         FROM community_posts cp
-         JOIN users u ON cp.user_id = u.id
-         WHERE cp.community_id = $1
-         ORDER BY cp.created_at DESC
-         LIMIT 20`,
-        [community.id]
-      );
-      posts = postsRes.rows;
-    }
-
-    res.json({
-      community,
-      ranking: rankRes.rows,
-      posts,
-      access
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Erro ao obter comunidade.' });
-  }
-});
-
-// ============================================
-// ENTRAR NUMA COMUNIDADE
-// POST /api/communities/:slug/join
-// ============================================
-router.post('/:slug/join', auth, async (req, res) => {
-  const userId = req.user.userId;
-
-  try {
-    const commRes = await db.query(
-      'SELECT * FROM communities WHERE slug = $1',
-      [req.params.slug]
-    );
-    const community = commRes.rows[0];
-    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
-
-    // Contar missões completadas do utilizador nesta categoria
-    const missionsRes = await db.query(
-      `SELECT COUNT(*) as total FROM missions
-       WHERE (user_id = $1 OR partner_id = $1)
-         AND category = $2
-         AND status = 'completed'`,
-      [userId, community.category]
-    );
-    const missionsDone = parseInt(missionsRes.rows[0].total);
-    const rank = getRank(missionsDone);
-
-    // Adicionar membro
-    await db.query(
-      `INSERT INTO community_members (community_id, user_id, rank, missions_done)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (community_id, user_id) DO NOTHING`,
-      [community.id, userId, rank, missionsDone]
-    );
-
-    // Atualizar contador de membros
-    await db.query(
-      'UPDATE communities SET member_count = member_count + 1 WHERE id = $1',
-      [community.id]
-    );
-
-    res.json({
-      success: true,
-      rank,
-      missions_done: missionsDone,
-      message: `Bem-vindo à comunidade ${community.name}! A tua patente é ${rank}.`
-    });
-
-  } catch (err) {
-    res.status(500).json({ error: 'Erro ao entrar na comunidade.' });
-  }
-});
-
-// ============================================
-// PUBLICAR POST NO FÓRUM
-// POST /api/communities/:slug/posts
-// Body: { content }
-// ============================================
-router.post('/:slug/posts', auth, async (req, res) => {
-  const { content } = req.body;
-  const userId = req.user.userId;
-
-  if (!content?.trim()) {
-    return res.status(400).json({ error: 'Conteúdo não pode estar vazio.' });
-  }
-
-  try {
-    const commRes = await db.query(
-      'SELECT * FROM communities WHERE slug = $1',
-      [req.params.slug]
-    );
-    const community = commRes.rows[0];
-    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
-
-    // Verificar se é membro
-    const memberRes = await db.query(
-      'SELECT * FROM community_members WHERE community_id = $1 AND user_id = $2',
-      [community.id, userId]
-    );
-    if (!memberRes.rows[0]) {
-      return res.status(403).json({ error: 'Tens de ser membro para publicar.' });
-    }
-
-    // Verificar se completou pelo menos uma missão nesta categoria
-    const completedRes = await db.query(
-      `SELECT COUNT(*) as total FROM missions
-       WHERE (user_id = $1 OR partner_id = $1)
-         AND category = $2
-         AND status = 'completed'`,
-      [userId, community.category]
-    );
-    const completed = parseInt(completedRes.rows[0].total);
-    if (completed === 0) {
-      return res.status(403).json({
-        error: 'Tens de completar uma missão nesta categoria para poder publicar.',
-        locked: true
-      });
-    }
-
-    const result = await db.query(
-      `INSERT INTO community_posts (community_id, user_id, content)
-       VALUES ($1, $2, $3) RETURNING *`,
-      [community.id, userId, content.trim()]
-    );
-
-    res.status(201).json({ post: result.rows[0] });
-
-  } catch (err) {
-    res.status(500).json({ error: 'Erro ao publicar post.' });
-  }
-});
+// As rotas com prefixo fixo (/suggest, /smart-suggest) ficam antes de /:slug.
+// Hoje /:slug só pega um pedaço do caminho, então elas já respondiam; a ordem
+// deixa isso explícito e evita que uma rota /:slug/... nova as esconda.
 
 // ============================================
 // SUGESTÃO DE COMUNIDADE (IA)
@@ -282,60 +132,6 @@ router.get('/suggest/:category', auth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao sugerir comunidades.' });
-  }
-});
-
-// ============================================
-// CRIAR COMUNIDADE
-// POST /api/communities
-// Body: { name, description, category, icon, cover_color }
-// ============================================
-router.post('/', auth, async (req, res) => {
-  const { name, description, category, icon, cover_color } = req.body;
-  const userId = req.user.userId;
-
-  if (!name || !category) {
-    return res.status(400).json({ error: 'Nome e categoria são obrigatórios.' });
-  }
-
-  try {
-    // Verificar patente do utilizador — precisa de ser pelo menos Elite
-    const rankRes = await db.query(
-      `SELECT COUNT(*) as total FROM missions
-       WHERE (user_id = $1 OR partner_id = $1)
-         AND status = 'completed'`,
-      [userId]
-    );
-    const totalCompleted = parseInt(rankRes.rows[0].total);
-    if (totalCompleted < 3) {
-      return res.status(403).json({
-        error: 'Precisas de completar pelo menos 3 missões para criar uma comunidade.',
-        missions_done: totalCompleted,
-        needed: 3
-      });
-    }
-
-    const slug = name.toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
-
-    const result = await db.query(
-      `INSERT INTO communities (name, slug, description, category, icon, cover_color, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [name, slug, description, category, icon || '⚡', cover_color || '#FF5C00', userId]
-    );
-
-    res.status(201).json({
-      community: result.rows[0],
-      message: 'Comunidade criada com sucesso!'
-    });
-
-  } catch (err) {
-    if (err.code === '23505') {
-      return res.status(400).json({ error: 'Já existe uma comunidade com este nome.' });
-    }
-    res.status(500).json({ error: 'Erro ao criar comunidade.' });
   }
 });
 
@@ -442,6 +238,288 @@ router.get('/smart-suggest/:missionId', auth, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erro ao gerar sugestão.' });
+  }
+});
+
+// ============================================
+// VER COMUNIDADE
+// GET /api/communities/:slug
+// ============================================
+router.get('/:slug', auth, async (req, res) => {
+  const userId = req.user.userId;
+  try {
+    const commRes = await db.query(
+      `SELECT c.*,
+        CASE WHEN cm.user_id IS NOT NULL THEN true ELSE false END AS is_member,
+        cm.rank AS my_rank,
+        ${CATEGORY_PROGRESS_SELECT}
+       FROM communities c
+       LEFT JOIN community_members cm
+         ON cm.community_id = c.id AND cm.user_id = $1
+       WHERE c.slug = $2`,
+      [userId, req.params.slug]
+    );
+
+    const community = commRes.rows[0];
+    const access = community ? getCommunityAccess(community) : null;
+    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
+
+    // Top 10 ranking
+    const rankRes = await db.query(
+      `SELECT cm.rank, cm.missions_done, cm.total_days, u.username
+       FROM community_members cm
+       JOIN users u ON cm.user_id = u.id
+       WHERE cm.community_id = $1
+       ORDER BY cm.missions_done DESC, cm.total_days DESC
+       LIMIT 10`,
+      [community.id]
+    );
+
+    // Posts recentes
+    let posts = [];
+    if (access.can_read_forum) {
+      const postsRes = await db.query(
+        `SELECT cp.*, u.username
+         FROM community_posts cp
+         JOIN users u ON cp.user_id = u.id
+         WHERE cp.community_id = $1
+         ORDER BY cp.created_at DESC
+         LIMIT 20`,
+        [community.id]
+      );
+      posts = postsRes.rows;
+    }
+
+    res.json({
+      community,
+      ranking: rankRes.rows,
+      posts,
+      access
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao obter comunidade.' });
+  }
+});
+
+// ============================================
+// ENTRAR NUMA COMUNIDADE
+// POST /api/communities/:slug/join
+// ============================================
+router.post('/:slug/join', auth, async (req, res) => {
+  const userId = req.user.userId;
+
+  try {
+    const commRes = await db.query(
+      'SELECT * FROM communities WHERE slug = $1',
+      [req.params.slug]
+    );
+    const community = commRes.rows[0];
+    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
+
+    // Contar missões completadas do utilizador nesta categoria
+    const missionsRes = await db.query(
+      `SELECT COUNT(*) as total FROM missions
+       WHERE (user_id = $1 OR partner_id = $1)
+         AND category = $2
+         AND status = 'completed'`,
+      [userId, community.category]
+    );
+    const missionsDone = parseInt(missionsRes.rows[0].total);
+    const rank = getRank(missionsDone);
+
+    // Adicionar membro. Se a pessoa já era membro, o ON CONFLICT não grava
+    // nada (rowCount 0) e o contador não sobe. A chave única
+    // (community_id, user_id) garante isso mesmo com dois pedidos ao mesmo tempo.
+    const memberInsert = await db.query(
+      `INSERT INTO community_members (community_id, user_id, rank, missions_done)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (community_id, user_id) DO NOTHING
+       RETURNING id`,
+      [community.id, userId, rank, missionsDone]
+    );
+    const joinedNow = memberInsert.rowCount === 1;
+
+    if (joinedNow) {
+      await db.query(
+        'UPDATE communities SET member_count = member_count + 1 WHERE id = $1',
+        [community.id]
+      );
+    }
+
+    res.json({
+      success: true,
+      already_member: !joinedNow,
+      rank,
+      missions_done: missionsDone,
+      message: `Bem-vindo à comunidade ${community.name}! A tua patente é ${rank}.`
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao entrar na comunidade.' });
+  }
+});
+
+// ============================================
+// PUBLICAR POST NO FÓRUM
+// POST /api/communities/:slug/posts
+// Body: { content }
+//
+// Ordem: filtro de crise → texto válido e até 280 caracteres → comunidade →
+// membro com 1 missão concluída na categoria (regra que já existia) →
+// limite de posts por pessoa em 24 horas → grava.
+// ============================================
+router.post('/:slug/posts', auth, async (req, res) => {
+  const userId = req.user.userId;
+  const content = req.body?.content;
+
+  // Filtro de crise antes de tudo, o mesmo do check-in. Se dispara, o post
+  // não é gravado, o texto não vai para log nem para a IA, e a resposta
+  // leva crisis + crisis_level para o site abrir a tela de ajuda.
+  const crisisLevel = typeof content === 'string' ? classifyNote(content) : null;
+  if (crisisLevel) {
+    return res.status(200).json({
+      posted: false,
+      crisis: true,
+      crisis_level: crisisLevel,
+      message: POST_CRISIS_MESSAGE
+    });
+  }
+
+  if (content != null && typeof content !== 'string') {
+    return res.status(400).json({ error: POST_NOT_TEXT_MESSAGE });
+  }
+  const text = (content || '').trim();
+  if (!text) {
+    return res.status(400).json({ error: POST_EMPTY_MESSAGE });
+  }
+  if (noteLength(text) > POST_MAX_CHARS) {
+    return res.status(400).json({ error: POST_TOO_LONG_MESSAGE });
+  }
+
+  let client;
+  try {
+    const commRes = await db.query(
+      'SELECT * FROM communities WHERE slug = $1',
+      [req.params.slug]
+    );
+    const community = commRes.rows[0];
+    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
+
+    // Verificar se é membro
+    const memberRes = await db.query(
+      'SELECT * FROM community_members WHERE community_id = $1 AND user_id = $2',
+      [community.id, userId]
+    );
+    if (!memberRes.rows[0]) {
+      return res.status(403).json({ error: POST_NOT_MEMBER_MESSAGE });
+    }
+
+    // Verificar se completou pelo menos uma missão nesta categoria
+    const completedRes = await db.query(
+      `SELECT COUNT(*) as total FROM missions
+       WHERE (user_id = $1 OR partner_id = $1)
+         AND category = $2
+         AND status = 'completed'`,
+      [userId, community.category]
+    );
+    const completed = parseInt(completedRes.rows[0].total);
+    if (completed === 0) {
+      return res.status(403).json({
+        error: POST_LOCKED_MESSAGE,
+        locked: true
+      });
+    }
+
+    // Limite de posts: contar e gravar na mesma transação, com a linha da
+    // pessoa travada, para dois pedidos ao mesmo tempo não passarem do limite.
+    client = await db.connect();
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+    const countRes = await client.query(
+      `SELECT COUNT(*) AS total FROM community_posts
+       WHERE user_id = $1
+         AND created_at > NOW() - INTERVAL '24 hours'`,
+      [userId]
+    );
+    if (parseInt(countRes.rows[0].total) >= POSTS_PER_DAY) {
+      await client.query('ROLLBACK');
+      return res.status(429).json({
+        error: POST_RATE_LIMIT_MESSAGE,
+        limit: POSTS_PER_DAY
+      });
+    }
+
+    const result = await client.query(
+      `INSERT INTO community_posts (community_id, user_id, content)
+       VALUES ($1, $2, $3) RETURNING *`,
+      [community.id, userId, text]
+    );
+    await client.query('COMMIT');
+
+    res.status(201).json({ post: result.rows[0] });
+
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
+    }
+    // Sem log do erro aqui: nada do pedido (nem o texto do post) vai para o console.
+    res.status(500).json({ error: POST_SERVER_ERROR_MESSAGE });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ============================================
+// CRIAR COMUNIDADE
+// POST /api/communities
+// Body: { name, description, category, icon, cover_color }
+// ============================================
+router.post('/', auth, async (req, res) => {
+  const { name, description, category, icon, cover_color } = req.body;
+  const userId = req.user.userId;
+
+  if (!name || !category) {
+    return res.status(400).json({ error: 'Nome e categoria são obrigatórios.' });
+  }
+
+  try {
+    // Verificar patente do utilizador — precisa de ser pelo menos Elite
+    const rankRes = await db.query(
+      `SELECT COUNT(*) as total FROM missions
+       WHERE (user_id = $1 OR partner_id = $1)
+         AND status = 'completed'`,
+      [userId]
+    );
+    const totalCompleted = parseInt(rankRes.rows[0].total);
+    if (totalCompleted < 3) {
+      return res.status(403).json({
+        error: 'Precisas de completar pelo menos 3 missões para criar uma comunidade.',
+        missions_done: totalCompleted,
+        needed: 3
+      });
+    }
+
+    const slug = name.toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+
+    const result = await db.query(
+      `INSERT INTO communities (name, slug, description, category, icon, cover_color, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [name, slug, description, category, icon || '⚡', cover_color || '#FF5C00', userId]
+    );
+
+    res.status(201).json({
+      community: result.rows[0],
+      message: 'Comunidade criada com sucesso!'
+    });
+
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ error: 'Já existe uma comunidade com este nome.' });
+    }
+    res.status(500).json({ error: 'Erro ao criar comunidade.' });
   }
 });
 

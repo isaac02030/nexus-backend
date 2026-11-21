@@ -6,6 +6,7 @@
 const express = require('express');
 const { Pool } = require('pg');
 const auth = require('../middleware/auth');
+const { validateMissionWeekdays } = require('../lib/mission-days');
 const router = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -190,12 +191,20 @@ router.post('/', auth, async (req, res) => {
     proof_mode,
     study_focus,
     study_current_stage,
-    study_target_outcome
+    study_target_outcome,
+    mission_weekdays
   } = req.body;
   const userId = req.user.userId;
 
   if (!title || !category) {
     return res.status(400).json({ error: 'Titulo e categoria sao obrigatorios.' });
+  }
+
+  // Dias da missão (1 = segunda ... 7 = domingo), de 3 a 7 por semana.
+  // Sem o campo, valem todos os dias, como antes.
+  const weekdays = validateMissionWeekdays(mission_weekdays);
+  if (!weekdays.ok) {
+    return res.status(400).json({ error: weekdays.error });
   }
 
   try {
@@ -205,13 +214,17 @@ router.post('/', auth, async (req, res) => {
     await healWaitingSoloMissions();
 
     const requestedMode = ['parceiro', 'rival'].includes(mode) ? mode : 'solo';
+    // A coluna mission_weekdays vem da migração 004. Só entra no INSERT
+    // quando a pessoa escolheu os dias; sem escolha, o INSERT fica igual
+    // ao de antes e funciona mesmo sem a migração aplicada.
+    const withWeekdays = weekdays.value !== null;
     const result = await db.query(
       `INSERT INTO missions (
          user_id, title, category, level, mode, match_preference, description,
          daily_minimum, commitment_window, why_it_matters, fallback_plan, proof_mode,
-         study_focus, study_current_stage, study_target_outcome
+         study_focus, study_current_stage, study_target_outcome${withWeekdays ? ', mission_weekdays' : ''}
        )
-       VALUES ($1, $2, $3, $4, 'solo', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       VALUES ($1, $2, $3, $4, 'solo', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14${withWeekdays ? ', $15::smallint[]' : ''})
        RETURNING *`,
       [
         userId,
@@ -227,9 +240,15 @@ router.post('/', auth, async (req, res) => {
         proof_mode || 'self_report',
         study_focus || null,
         study_current_stage || null,
-        study_target_outcome || null
+        study_target_outcome || null,
+        ...(withWeekdays ? [weekdays.value] : [])
       ]
-    );
+    ).catch((err) => {
+      // 42703 = coluna não existe: a migração 004 ainda não foi aplicada.
+      // O INSERT falhou inteiro, então nada foi criado.
+      if (err && err.code === '42703' && withWeekdays) err.missionWeekdaysMissing = true;
+      throw err;
+    });
 
     const now = new Date();
     const endsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
@@ -260,6 +279,11 @@ router.post('/', auth, async (req, res) => {
           : 'Missao solo criada.'
     });
   } catch (err) {
+    if (err && err.missionWeekdaysMissing === true) {
+      return res.status(503).json({
+        error: 'A escolha dos dias da missão ainda não está disponível. Crie a missão sem escolher os dias ou tente mais tarde.'
+      });
+    }
     res.status(500).json({ error: 'Erro ao criar missao.' });
   }
 });

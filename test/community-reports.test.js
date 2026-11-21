@@ -11,7 +11,7 @@ process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
 
 const communitiesRouter = require('../routes/communities');
-const { HIDE_AFTER_REPORTS, pickHiddenReason, REASON_CODES } = require('../lib/post-reports');
+const { HIDE_AFTER_REPORTS, pickHiddenReason, shouldHide, REASON_CODES } = require('../lib/post-reports');
 
 const app = express();
 app.use(express.json());
@@ -36,6 +36,7 @@ function resetDb() {
   db.clock = 1000;
   db.queries = [];
   db.missingSchema = false;
+  db.notAdult = new Set();
 }
 
 function normalize(sql) {
@@ -53,6 +54,11 @@ function handle(sql, params = []) {
   db.queries.push({ text, params });
 
   if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(text)) return { rows: [] };
+
+  // 18+ confirmado no cadastro (todo mundo, menos quem está em notAdult).
+  if (/adult_confirmed_at'\) IS NOT NULL AS adult_confirmed FROM users WHERE id = \$1$/i.test(text)) {
+    return { rows: [{ adult_confirmed: !db.notAdult.has(Number(params[0])) }] };
+  }
 
   if (/^SELECT \* FROM communities WHERE slug = \$1/i.test(text)) {
     const c = db.communities.find((item) => item.slug === params[0]);
@@ -143,8 +149,11 @@ function handle(sql, params = []) {
       hidden_at: p.hidden_at,
       hidden_reason: p.hidden_reason,
       reports: db.reports.filter((r) => r.post_id === p.id)
-        .map((r) => ({ reason: r.reason, details: r.details, created_at: r.created_at }))
+        .map((r) => ({ reason: r.reason, details: r.details, created_at: r.created_at })),
+      urgent: db.reports.some((r) => r.post_id === p.id && r.reason === params[0])
     }));
+    // ORDER BY urgent DESC, hidden_at ASC
+    rows.sort((a, b) => (Number(b.urgent) - Number(a.urgent)) || (a.hidden_at - b.hidden_at));
     return { rows };
   }
 
@@ -245,8 +254,12 @@ describe('comunidade: denúncia, post escondido e moderação', { concurrency: 1
 
   // ---------- regras ----------
 
-  test('N = 3 pessoas diferentes', () => {
+  test('N = 3 pessoas diferentes; "perigoso" esconde com 1', () => {
     assert.equal(HIDE_AFTER_REPORTS, 3);
+    assert.equal(shouldHide([{ reason: 'spam', total: '2' }]), false);
+    assert.equal(shouldHide([{ reason: 'spam', total: '2' }, { reason: 'ofensa', total: '1' }]), true);
+    assert.equal(shouldHide([{ reason: 'perigoso', total: '1' }]), true);
+    assert.equal(pickHiddenReason([{ reason: 'spam', total: '2' }, { reason: 'perigoso', total: '1' }]), 'perigoso');
   });
 
   test('motivo escondido: o mais citado; no empate, o mais grave', () => {
@@ -539,6 +552,93 @@ describe('comunidade: denúncia, post escondido e moderação', { concurrency: 1
     const restore = await request('POST', '/api/communities/admin/posts/10/restore', { token: t });
     assert.equal(list.status, 503);
     assert.equal(restore.status, 503);
+  });
+
+  // ---------- 18+ e motivo "perigoso" ----------
+
+  test('negado: sem 18+ confirmado não denuncia (403 com código) e nada é gravado', async () => {
+    addMember(5);
+    db.notAdult.add(5);
+    const res = await report(5);
+    assert.equal(res.status, 403);
+    assert.equal(res.body.code, 'adult_confirmation_required');
+    assert.equal(res.body.adult_confirmation_required, true);
+    assert.match(res.body.error, /maiores de 18 anos/);
+    assert.equal(db.reports.length, 0);
+  });
+
+  test('sem 18+ e com crise no comentário: mostra a ajuda, nada gravado', async () => {
+    addMember(5);
+    db.notAdult.add(5);
+    const res = await report(5, { details: 'quero me matar' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.crisis, true);
+    assert.equal(res.body.reported, false);
+    assert.equal(db.reports.length, 0);
+  });
+
+  test('a conferência de 18+ lê a coluna por to_jsonb (sem a 006, ninguém passa)', async () => {
+    addMember(5);
+    await report(5);
+    const q = db.queries.find((item) => /adult_confirmed FROM users WHERE id = \$1$/.test(item.text));
+    assert.ok(q);
+    assert.match(q.text, /to_jsonb\(users\) ->> 'adult_confirmed_at'/);
+    assert.deepEqual(q.params, [5]);
+  });
+
+  test('"perigoso" esconde já na 1.ª denúncia, com esse motivo', async () => {
+    addMember(5);
+    const res = await report(5, { reason: 'perigoso' });
+    assert.equal(res.status, 201);
+    const post = db.posts.find((p) => p.id === 10);
+    assert.notEqual(post.hidden_at, null);
+    assert.equal(post.hidden_reason, 'perigoso');
+  });
+
+  test('"perigoso" depois de 1 spam: esconde e o motivo é perigoso', async () => {
+    addMember(5);
+    addMember(6);
+    await report(5, { reason: 'spam' });
+    assert.equal(db.posts.find((p) => p.id === 10).hidden_at, null);
+    await report(6, { reason: 'perigoso' });
+    const post = db.posts.find((p) => p.id === 10);
+    assert.notEqual(post.hidden_at, null);
+    assert.equal(post.hidden_reason, 'perigoso');
+  });
+
+  test('os outros motivos continuam com 3: 2 ofensas não escondem', async () => {
+    addMember(5);
+    addMember(6);
+    await report(5, { reason: 'ofensa' });
+    await report(6, { reason: 'improprio' });
+    assert.equal(db.posts.find((p) => p.id === 10).hidden_at, null);
+  });
+
+  test('admin: "perigoso" vem primeiro com prioridade alta, sem quem denunciou', async () => {
+    for (const id of [5, 6, 7, 8]) addMember(id);
+    db.posts.push({ id: 12, community_id: 3, user_id: AUTHOR, content: 'Outra dica do autor', created_at: '2026-11-21T11:00:00Z', hidden_at: null, hidden_reason: null, restored_at: null });
+    // Post 10 escondido antes, por spam (3 pessoas).
+    for (const id of [5, 6, 7]) await report(id, { postId: 10, reason: 'spam' });
+    // Post 12 escondido depois, por 1 "perigoso".
+    await report(8, { postId: 12, reason: 'perigoso' });
+    const res = await request('GET', '/api/communities/admin/hidden-posts', { token: tokenFor(ADMIN) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.posts.map((p) => [p.id, p.priority]), [[12, 'alta'], [10, 'normal']]);
+    assert.equal('urgent' in res.body.posts[0], false);
+    assert.equal(JSON.stringify(res.body).includes('reporter_id'), false);
+    const listQuery = db.queries.find((q) => /WHERE cp\.hidden_at IS NOT NULL/.test(q.text));
+    assert.deepEqual(listQuery.params, ['perigoso']);
+    assert.match(listQuery.text, /ORDER BY urgent DESC, cp\.hidden_at ASC/);
+  });
+
+  test('restaurado e denunciado de novo como "perigoso": esconde outra vez', async () => {
+    addMember(5);
+    addMember(6);
+    await report(5, { reason: 'perigoso' });
+    await request('POST', '/api/communities/admin/posts/10/restore', { token: tokenFor(ADMIN) });
+    assert.equal(db.posts.find((p) => p.id === 10).hidden_at, null);
+    await report(6, { reason: 'perigoso' });
+    assert.notEqual(db.posts.find((p) => p.id === 10).hidden_at, null);
   });
 
   test('rotas de admin vêm antes de /:slug', () => {

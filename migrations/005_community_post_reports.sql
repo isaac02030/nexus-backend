@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS community_post_reports (
 );
 
 COMMENT ON TABLE community_post_reports IS
-  'Uma denúncia por pessoa por post. Com 3 pessoas diferentes, o post fica escondido.';
+  'Uma denúncia por pessoa por post. Com 3 pessoas diferentes, ou 1 com o motivo perigoso, o post fica escondido.';
 
 CREATE INDEX IF NOT EXISTS idx_community_posts_hidden
   ON community_posts(hidden_at) WHERE hidden_at IS NOT NULL;

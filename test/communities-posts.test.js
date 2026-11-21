@@ -23,7 +23,8 @@ const db = {
   recentPosts: new Map(),       // userId -> posts nas últimas 24 horas
   posts: [],
   queries: [],
-  failInsert: false
+  failInsert: false,
+  notAdult: new Set()
 };
 
 function resetDb() {
@@ -34,6 +35,7 @@ function resetDb() {
   db.posts = [];
   db.queries = [];
   db.failInsert = false;
+  db.notAdult = new Set();
 }
 
 function normalize(sql) {
@@ -45,6 +47,11 @@ function handle(sql, params = []) {
   db.queries.push({ text, params });
 
   if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(text)) return { rows: [] };
+
+  // 18+ confirmado no cadastro (todo mundo, menos quem está em notAdult).
+  if (/adult_confirmed_at'\) IS NOT NULL AS adult_confirmed FROM users WHERE id = \$1$/i.test(text)) {
+    return { rows: [{ adult_confirmed: !db.notAdult.has(Number(params[0])) }] };
+  }
 
   if (/^INSERT INTO community_members/i.test(text)) {
     const exists = db.members.some((m) =>
@@ -393,5 +400,45 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
     assert.match(res.body.error, /Tente de novo/);
     assert.equal(consoleCalls.length, 0);
     assert.ok(db.queries.some((q) => q.text === 'ROLLBACK'));
+  });
+
+  // ---------- 18+ confirmado ----------
+
+  test('negado: entrar sem 18+ confirmado (403 com código), sem virar membro', async () => {
+    db.notAdult.add(1);
+    const res = await request('POST', '/api/communities/foco/join', { token: tokenFor(1) });
+    assert.equal(res.status, 403);
+    assert.equal(res.body.code, 'adult_confirmation_required');
+    assert.match(res.body.error, /maiores de 18 anos/);
+    assert.equal(db.members.length, 0);
+    assert.equal(db.communities[0].member_count, 1);
+  });
+
+  test('negado: publicar sem 18+ confirmado (403 com código), nada gravado', async () => {
+    makeMember(1);
+    db.notAdult.add(1);
+    const res = await request('POST', '/api/communities/foco/posts', {
+      token: tokenFor(1), body: { content: 'uma dica' }
+    });
+    assert.equal(res.status, 403);
+    assert.equal(res.body.code, 'adult_confirmation_required');
+    assert.equal(res.body.adult_confirmation_required, true);
+    assert.equal(insertedPost(), false);
+  });
+
+  test('sem 18+ e post com crise: a ajuda aparece antes, nada gravado', async () => {
+    makeMember(1);
+    db.notAdult.add(1);
+    const res = await request('POST', '/api/communities/foco/posts', {
+      token: tokenFor(1), body: { content: 'quero me matar' }
+    });
+    assert.equal(res.body.crisis, true);
+    assert.equal(insertedPost(), false);
+  });
+
+  test('com 18+ confirmado: entra normalmente', async () => {
+    const res = await request('POST', '/api/communities/foco/join', { token: tokenFor(1) });
+    assert.equal(res.status, 200);
+    assert.ok(db.queries.some((q) => /adult_confirmed FROM users WHERE id = \$1$/.test(q.text)));
   });
 });

@@ -10,11 +10,11 @@ const { classifyNote } = require('../lib/crisis-filter');
 const { NOTE_MAX_CHARS, noteLength } = require('../lib/note-limit');
 const { ensureAdmin } = require('../lib/admin');
 const {
-  HIDE_AFTER_REPORTS,
+  URGENT_REASON,
   isValidReason,
   reasonLabel,
   pickHiddenReason,
-  countReports,
+  shouldHide,
   hiddenMessage
 } = require('../lib/post-reports');
 const router   = express.Router();
@@ -55,6 +55,27 @@ const MOD_POST_NOT_FOUND_MESSAGE = 'Post não encontrado.';
 const MOD_NOT_HIDDEN_MESSAGE = 'Este post não está escondido.';
 const MOD_UNAVAILABLE_MESSAGE = 'A moderação ainda não está disponível: falta aplicar a migração 005.';
 const MOD_SERVER_ERROR_MESSAGE = 'Não deu para concluir agora. Tente de novo daqui a pouco.';
+
+// Comunidade só para quem confirmou 18+ no cadastro (users.adult_confirmed_at).
+// Lido por to_jsonb: sem a migração 006, ninguém aparece confirmado e a
+// comunidade fica fechada (falha para o lado seguro).
+const ADULT_REQUIRED_CODE = 'adult_confirmation_required';
+const ADULT_REQUIRED_MESSAGE = 'A comunidade é só para maiores de 18 anos. Confirme sua idade para entrar, publicar ou denunciar.';
+const ADULT_REQUIRED_BODY = Object.freeze({
+  error: ADULT_REQUIRED_MESSAGE,
+  code: ADULT_REQUIRED_CODE,
+  adult_confirmation_required: true
+});
+
+async function hasAdultConfirmation(userId) {
+  const result = await db.query(
+    `SELECT (to_jsonb(users) ->> 'adult_confirmed_at') IS NOT NULL AS adult_confirmed
+     FROM users
+     WHERE id = $1`,
+    [userId]
+  );
+  return result.rows[0]?.adult_confirmed === true;
+}
 
 // Coluna ou tabela que ainda não existe (migração não aplicada).
 function isMissingSchema(err) {
@@ -303,17 +324,24 @@ router.get('/admin/hidden-posts', auth, async (req, res) => {
                        ) ORDER BY r.created_at)
                 FROM community_post_reports r
                 WHERE r.post_id = cp.id
-              ), '[]'::json) AS reports
+              ), '[]'::json) AS reports,
+              EXISTS (
+                SELECT 1 FROM community_post_reports r2
+                WHERE r2.post_id = cp.id AND r2.reason = $1
+              ) AS urgent
        FROM community_posts cp
        JOIN communities c ON c.id = cp.community_id
        JOIN users u ON u.id = cp.user_id
        WHERE cp.hidden_at IS NOT NULL
-       ORDER BY cp.hidden_at ASC
-       LIMIT 100`
+       ORDER BY urgent DESC, cp.hidden_at ASC
+       LIMIT 100`,
+      [URGENT_REASON]
     );
+    // Prioridade alta: alguma denúncia "perigoso" (saúde). Vêm primeiro.
     res.json({
-      posts: result.rows.map((post) => ({
+      posts: result.rows.map(({ urgent, ...post }) => ({
         ...post,
+        priority: urgent ? 'alta' : 'normal',
         hidden_reason_label: reasonLabel(post.hidden_reason)
       }))
     });
@@ -450,6 +478,10 @@ router.post('/:slug/join', auth, async (req, res) => {
   const userId = req.user.userId;
 
   try {
+    if (!(await hasAdultConfirmation(userId))) {
+      return res.status(403).json({ ...ADULT_REQUIRED_BODY });
+    }
+
     const commRes = await db.query(
       'SELECT * FROM communities WHERE slug = $1',
       [req.params.slug]
@@ -505,7 +537,8 @@ router.post('/:slug/join', auth, async (req, res) => {
 // POST /api/communities/:slug/posts
 // Body: { content }
 //
-// Ordem: filtro de crise → texto válido e até 280 caracteres → comunidade →
+// Ordem: filtro de crise → texto válido e até 280 caracteres → 18+
+// confirmado → comunidade →
 // membro com 1 missão concluída na categoria (regra que já existia) →
 // limite de posts por pessoa em 24 horas → grava.
 // ============================================
@@ -539,6 +572,10 @@ router.post('/:slug/posts', auth, async (req, res) => {
 
   let client;
   try {
+    if (!(await hasAdultConfirmation(userId))) {
+      return res.status(403).json({ ...ADULT_REQUIRED_BODY });
+    }
+
     const commRes = await db.query(
       'SELECT * FROM communities WHERE slug = $1',
       [req.params.slug]
@@ -616,9 +653,10 @@ router.post('/:slug/posts', auth, async (req, res) => {
 // Body: { reason, details? }
 //
 // Ordem: filtro de crise no comentário → id e motivo válidos → comentário até
-// 280 caracteres → comunidade → membro → (transação, com o post travado)
+// 280 caracteres → 18+ confirmado → comunidade → membro → (transação, com o post travado)
 // post desta comunidade → não é o autor → uma vez por pessoa → conta as
-// denúncias desde a última restauração → esconde com HIDE_AFTER_REPORTS.
+// denúncias desde a última restauração → esconde com 3 pessoas, ou já na
+// 1.ª denúncia "perigoso" (lib/post-reports.js, shouldHide).
 //
 // Crise no comentário: a denúncia vale (o post pode ser perigoso), mas o
 // comentário não é gravado nem logado, e a resposta leva crisis + crisis_level.
@@ -657,6 +695,10 @@ router.post('/:slug/posts/:postId/report', auth, async (req, res) => {
 
   let client;
   try {
+    if (!(await hasAdultConfirmation(userId))) {
+      return refuse(403, { ...ADULT_REQUIRED_BODY });
+    }
+
     const commRes = await db.query(
       'SELECT * FROM communities WHERE slug = $1',
       [req.params.slug]
@@ -713,7 +755,7 @@ router.post('/:slug/posts/:postId/report', auth, async (req, res) => {
          GROUP BY reason`,
         [postId, post.restored_at || null]
       );
-      if (countReports(countRes.rows) >= HIDE_AFTER_REPORTS) {
+      if (shouldHide(countRes.rows)) {
         await client.query(
           `UPDATE community_posts
            SET hidden_at = NOW(), hidden_reason = $2

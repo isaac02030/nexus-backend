@@ -13,6 +13,7 @@ const {
 } = require('../lib/difficult-days');
 const { calculateRecoveryState } = require('../lib/recovery-state');
 const { classifyNote } = require('../lib/crisis-filter');
+const { validateNoteLimit } = require('../lib/note-limit');
 const {
   getLegacyMissionDayNumber,
   getMissionDayNumber,
@@ -151,6 +152,10 @@ router.post('/', auth, async (req, res) => {
     const mission = missionRes.rows[0];
     if (!mission) return reply(404, { error: 'Missão não encontrada.' });
     if (mission.status !== 'active') return reply(400, { error: 'Missão não está ativa.' });
+    // Limite de 280 caracteres, depois do filtro de crise (nota com crise
+    // já virou null acima) e depois de conferir que a pessoa é da missão.
+    const noteError = validateNoteLimit(note);
+    if (noteError) return reply(400, { error: noteError });
     // Dia difícil: o mínimo do contrato continua, mas a prova é um toque
     // («Fiz o mínimo», campo minimum_done: true). A frase fica opcional.
     // O check-in comum continua a exigir a prova do contrato.

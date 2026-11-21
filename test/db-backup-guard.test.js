@@ -61,6 +61,9 @@ test('o que conta como banco nesta máquina', () => {
   for (const url of [
     'postgresql://a@db.exemplo.invalid/n',
     'postgresql://a@10.0.0.5/n',
-    'postgresql://a@localhost/n?host=db.exemplo.invalid'
+    'postgresql://a@localhost/n?host=db.exemplo.invalid',
+    // host= vazio não pode transformar um endereço remoto em local.
+    'postgresql://u:p@db.exemplo.invalid/db?host=',
+    'postgresql://u:p@db.exemplo.invalid/db?host=%20'
   ]) assert.equal(isLocalDatabaseUrl(url), false, url);
 });

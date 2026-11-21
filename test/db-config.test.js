@@ -79,6 +79,7 @@ describe('TLS', () => {
     refuses({ DATABASE_URL: `${REMOTE}?sslmode=disable` }, /nesta máquina/);
     // host= da URL vale mais que o endereço: socket aponta para fora? Não; IP remoto, sim.
     refuses({ DATABASE_URL: `${LOCAL}?host=10.0.0.5`, DATABASE_SSL: 'disable' }, /nesta máquina/);
+    refuses({ DATABASE_URL: `${REMOTE}?host=`, DATABASE_SSL: 'disable' }, /nesta máquina/);
   });
 
   test('require em produção é aceito, mas avisa', () => {

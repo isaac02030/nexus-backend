@@ -8,6 +8,18 @@ const { Pool } = require('pg');
 const auth     = require('../middleware/auth');
 const { classifyNote } = require('../lib/crisis-filter');
 const { NOTE_MAX_CHARS, noteLength } = require('../lib/note-limit');
+const { ensureAdmin } = require('../lib/admin');
+const { makeAdultGate, adultRequiredBody } = require('../lib/adult-gate');
+const {
+  URGENT_REASON,
+  FAST_TRACK_PER_DAY,
+  REPEAT_ALERT_POSTS,
+  isValidReason,
+  reasonLabel,
+  pickHiddenReason,
+  shouldHide,
+  hiddenMessage
+} = require('../lib/post-reports');
 const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -26,6 +38,41 @@ const POST_NOT_MEMBER_MESSAGE = 'Só membros desta comunidade podem publicar. En
 const POST_LOCKED_MESSAGE = 'Para publicar aqui, conclua primeiro uma missão desta categoria.';
 const POST_RATE_LIMIT_MESSAGE = `Você já publicou ${POSTS_PER_DAY} posts nas últimas 24 horas. Tente de novo amanhã.`;
 const POST_SERVER_ERROR_MESSAGE = 'Não deu para publicar agora. Tente de novo daqui a pouco.';
+
+// Denúncia de posts (regras em lib/post-reports.js).
+const REPORT_DONE_MESSAGE = 'Obrigado. Sua denúncia foi registrada.';
+const REPORT_CRISIS_SAVED_MESSAGE = 'Sua denúncia foi registrada, sem o texto que você escreveu. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const REPORT_CRISIS_NOT_SENT_MESSAGE = 'Sua denúncia não foi enviada. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const REPORT_REASON_MESSAGE = 'Escolha um dos motivos da lista e envie de novo.';
+const REPORT_DETAILS_NOT_TEXT_MESSAGE = 'O comentário precisa ser um texto. Escreva de novo e envie.';
+const REPORT_DETAILS_TOO_LONG_MESSAGE = `O comentário passou de ${NOTE_MAX_CHARS} caracteres. Encurte um pouco e envie de novo.`;
+const REPORT_NOT_MEMBER_MESSAGE = 'Só membros desta comunidade podem denunciar posts. Entre na comunidade e tente de novo.';
+const REPORT_POST_NOT_FOUND_MESSAGE = 'Post não encontrado. Ele pode ter sido apagado.';
+const REPORT_OWN_POST_MESSAGE = 'Você não pode denunciar o seu próprio post.';
+const REPORT_DUPLICATE_MESSAGE = 'Você já denunciou este post. Uma denúncia por pessoa já basta, obrigado.';
+const REPORT_UNAVAILABLE_MESSAGE = 'A denúncia ainda não está disponível. Tente de novo mais tarde.';
+const REPORT_SERVER_ERROR_MESSAGE = 'Não deu para enviar a denúncia agora. Tente de novo daqui a pouco.';
+
+// Moderação (só admin).
+const MOD_POST_NOT_FOUND_MESSAGE = 'Post não encontrado.';
+const MOD_NOT_HIDDEN_MESSAGE = 'Este post não está escondido.';
+const MOD_UNAVAILABLE_MESSAGE = 'A moderação ainda não está disponível: falta aplicar a migração 005.';
+const MOD_SERVER_ERROR_MESSAGE = 'Não deu para concluir agora. Tente de novo daqui a pouco.';
+
+// Portão 18+ (lib/adult-gate.js): vale para tudo daqui, menos o admin.
+const { hasAdultConfirmation, gate: adultGate } = makeAdultGate(db);
+
+// Coluna ou tabela que ainda não existe (migração não aplicada).
+function isMissingSchema(err) {
+  return err && (err.code === '42703' || err.code === '42P01');
+}
+
+// Id de post: inteiro positivo que cabe num INTEGER do Postgres.
+function parsePostId(value) {
+  if (typeof value !== 'string' || !/^[1-9]\d{0,9}$/.test(value)) return null;
+  const id = Number(value);
+  return id <= 2147483647 ? id : null;
+}
 
 const CATEGORY_PROGRESS_SELECT = `
   COALESCE((
@@ -77,6 +124,117 @@ function getRank(missionsDone) {
   if (missionsDone >= 1)  return 'veterano';
   return 'recruta';
 }
+
+// ============================================
+// MODERAÇÃO (só admin, o mesmo critério de routes/insights.js)
+// GET    /api/communities/admin/hidden-posts           → posts escondidos
+// POST   /api/communities/admin/posts/:postId/restore  → volta a aparecer
+// DELETE /api/communities/admin/posts/:postId          → apaga de vez
+// Ficam antes do portão 18+ e de /:slug. Quem denunciou não aparece: só
+// motivo, comentário e alertas.
+// ============================================
+router.get('/admin/hidden-posts', auth, async (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  try {
+    const result = await db.query(
+      `SELECT cp.id, cp.community_id, c.slug AS community_slug, cp.user_id,
+              u.username, cp.content, cp.created_at, cp.hidden_at, cp.hidden_reason,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                         'reason', r.reason,
+                         'details', r.details,
+                         'created_at', r.created_at
+                       ) ORDER BY r.created_at)
+                FROM community_post_reports r
+                WHERE r.post_id = cp.id
+              ), '[]'::json) AS reports,
+              EXISTS (
+                SELECT 1 FROM community_post_reports r2
+                WHERE r2.post_id = cp.id AND r2.reason = $1
+              ) AS urgent,
+              EXISTS (
+                SELECT 1 FROM community_post_reports r3
+                WHERE r3.post_id = cp.id
+                  AND r3.hid_post_at IS NOT NULL
+                  AND (
+                    SELECT COUNT(DISTINCT r4.post_id)
+                    FROM community_post_reports r4
+                    WHERE r4.reporter_id = r3.reporter_id
+                      AND r4.hid_post_at > NOW() - INTERVAL '24 hours'
+                  ) >= $2
+              ) AS repeat_reporter_alert
+       FROM community_posts cp
+       JOIN communities c ON c.id = cp.community_id
+       JOIN users u ON u.id = cp.user_id
+       WHERE cp.hidden_at IS NOT NULL
+       ORDER BY urgent DESC, cp.hidden_at ASC
+       LIMIT 100`,
+      [URGENT_REASON, REPEAT_ALERT_POSTS]
+    );
+    // Prioridade alta: alguma denúncia "perigoso" (saúde). Vêm primeiro.
+    // repeat_reporter_alert: alguém que ajudou a esconder este post escondeu
+    // 2 ou mais posts nas últimas 24 horas. Só o alerta, nunca quem é.
+    res.json({
+      posts: result.rows.map(({ urgent, ...post }) => ({
+        ...post,
+        priority: urgent ? 'alta' : 'normal',
+        hidden_reason_label: reasonLabel(post.hidden_reason)
+      }))
+    });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: MOD_UNAVAILABLE_MESSAGE });
+    res.status(500).json({ error: MOD_SERVER_ERROR_MESSAGE });
+  }
+});
+
+router.post('/admin/posts/:postId/restore', auth, async (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  const postId = parsePostId(req.params.postId);
+  if (!postId) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
+  try {
+    // restored_at: daqui em diante só contam denúncias novas.
+    const result = await db.query(
+      `UPDATE community_posts
+       SET hidden_at = NULL, hidden_reason = NULL, restored_at = NOW()
+       WHERE id = $1 AND hidden_at IS NOT NULL
+       RETURNING id`,
+      [postId]
+    );
+    if (result.rowCount === 1) {
+      return res.json({ restored: true, post_id: postId });
+    }
+    const exists = await db.query('SELECT id FROM community_posts WHERE id = $1', [postId]);
+    if (!exists.rows[0]) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
+    res.status(409).json({ error: MOD_NOT_HIDDEN_MESSAGE });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: MOD_UNAVAILABLE_MESSAGE });
+    res.status(500).json({ error: MOD_SERVER_ERROR_MESSAGE });
+  }
+});
+
+router.delete('/admin/posts/:postId', auth, async (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  const postId = parsePostId(req.params.postId);
+  if (!postId) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
+  try {
+    // As denúncias do post saem junto (ON DELETE CASCADE da migração 005).
+    const result = await db.query(
+      'DELETE FROM community_posts WHERE id = $1 RETURNING id',
+      [postId]
+    );
+    if (result.rowCount !== 1) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
+    res.json({ deleted: true, post_id: postId });
+  } catch (err) {
+    res.status(500).json({ error: MOD_SERVER_ERROR_MESSAGE });
+  }
+});
+
+// ============================================
+// PORTÃO 18+: daqui para baixo, tudo da comunidade (listar, sugerir, ver,
+// entrar, publicar, denunciar, criar) exige login e 18+ confirmado.
+// Sem a confirmação: 403 com code adult_confirmation_required.
+// ============================================
+router.use(adultGate);
 
 // ============================================
 // LISTAR COMUNIDADES
@@ -275,19 +433,36 @@ router.get('/:slug', auth, async (req, res) => {
       [community.id]
     );
 
-    // Posts recentes
+    // Posts recentes. Post escondido por denúncias some para todos, menos
+    // para o autor, que o vê com hidden: true e o motivo. As colunas da
+    // migração 005 são lidas por to_jsonb: antes dela, tudo sai visível,
+    // como antes, sem quebrar a página.
     let posts = [];
     if (access.can_read_forum) {
       const postsRes = await db.query(
-        `SELECT cp.*, u.username
+        `SELECT cp.id, cp.community_id, cp.user_id, cp.content, cp.created_at,
+                u.username,
+                (to_jsonb(cp) ->> 'hidden_at') IS NOT NULL AS hidden,
+                CASE WHEN cp.user_id = $2 THEN to_jsonb(cp) ->> 'hidden_reason' END AS hidden_reason
          FROM community_posts cp
          JOIN users u ON cp.user_id = u.id
          WHERE cp.community_id = $1
+           AND ((to_jsonb(cp) ->> 'hidden_at') IS NULL OR cp.user_id = $2)
          ORDER BY cp.created_at DESC
          LIMIT 20`,
-        [community.id]
+        [community.id, userId]
       );
-      posts = postsRes.rows;
+      posts = postsRes.rows.map((post) => {
+        if (!post.hidden) {
+          const { hidden_reason: _, ...visible } = post;
+          return visible;
+        }
+        return {
+          ...post,
+          hidden_reason_label: reasonLabel(post.hidden_reason),
+          hidden_message: hiddenMessage(post.hidden_reason)
+        };
+      });
     }
 
     res.json({
@@ -364,7 +539,8 @@ router.post('/:slug/join', auth, async (req, res) => {
 // POST /api/communities/:slug/posts
 // Body: { content }
 //
-// Ordem: filtro de crise → texto válido e até 280 caracteres → comunidade →
+// Ordem: filtro de crise → texto válido e até 280 caracteres → 18+
+// confirmado → comunidade →
 // membro com 1 missão concluída na categoria (regra que já existia) →
 // limite de posts por pessoa em 24 horas → grava.
 // ============================================
@@ -464,6 +640,179 @@ router.post('/:slug/posts', auth, async (req, res) => {
     }
     // Sem log do erro aqui: nada do pedido (nem o texto do post) vai para o console.
     res.status(500).json({ error: POST_SERVER_ERROR_MESSAGE });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ============================================
+// DENUNCIAR UM POST
+// POST /api/communities/:slug/posts/:postId/report
+// Body: { reason, details? }
+//
+// Ordem: filtro de crise no comentário → id e motivo válidos → comentário até
+// 280 caracteres → 18+ confirmado → comunidade → membro → (transação, com o post travado)
+// post desta comunidade → não é o autor → uma vez por pessoa → conta as
+// denúncias desde a última restauração → esconde com 3 pessoas, ou já na
+// 1.ª denúncia "perigoso" (lib/post-reports.js, shouldHide).
+//
+// Crise no comentário: a denúncia vale (o post pode ser perigoso), mas o
+// comentário não é gravado nem logado, e a resposta leva crisis + crisis_level.
+// Se a denúncia for recusada por outro motivo, a pessoa vê a ajuda do mesmo jeito.
+// ============================================
+router.post('/:slug/posts/:postId/report', auth, async (req, res) => {
+  const userId = req.user.userId;
+  const { reason, details } = req.body || {};
+
+  const crisisLevel = typeof details === 'string' ? classifyNote(details) : null;
+  const refuse = (status, payload) => {
+    if (crisisLevel) {
+      return res.status(200).json({
+        reported: false,
+        crisis: true,
+        crisis_level: crisisLevel,
+        message: REPORT_CRISIS_NOT_SENT_MESSAGE
+      });
+    }
+    return res.status(status).json(payload);
+  };
+
+  const postId = parsePostId(req.params.postId);
+  if (!postId) return refuse(404, { error: REPORT_POST_NOT_FOUND_MESSAGE });
+  if (!isValidReason(reason)) return refuse(400, { error: REPORT_REASON_MESSAGE });
+
+  let cleanDetails = null;
+  if (!crisisLevel && details != null) {
+    if (typeof details !== 'string') return refuse(400, { error: REPORT_DETAILS_NOT_TEXT_MESSAGE });
+    const text = details.trim();
+    if (noteLength(text) > NOTE_MAX_CHARS) {
+      return refuse(400, { error: REPORT_DETAILS_TOO_LONG_MESSAGE });
+    }
+    cleanDetails = text || null;
+  }
+
+  let client;
+  try {
+    // O portão 18+ já barrou antes; esta conferência é uma segunda trava
+    // antes de gravar a denúncia.
+    if (!(await hasAdultConfirmation(userId))) {
+      return refuse(403, adultRequiredBody());
+    }
+
+    const commRes = await db.query(
+      'SELECT * FROM communities WHERE slug = $1',
+      [req.params.slug]
+    );
+    const community = commRes.rows[0];
+    if (!community) return refuse(404, { error: 'Comunidade não encontrada.' });
+
+    const memberRes = await db.query(
+      'SELECT * FROM community_members WHERE community_id = $1 AND user_id = $2',
+      [community.id, userId]
+    );
+    if (!memberRes.rows[0]) return refuse(403, { error: REPORT_NOT_MEMBER_MESSAGE });
+
+    client = await db.connect();
+    await client.query('BEGIN');
+
+    // Trava a pessoa primeiro (a cota de "perigoso" não passa de 3 com
+    // pedidos ao mesmo tempo) e depois o post. Sempre nessa ordem, como na
+    // rota de posts, que só trava a pessoa.
+    await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+
+    // Trava o post: duas denúncias ao mesmo tempo não passam do número
+    // sem esconder, nem escondem duas vezes.
+    const postRes = await client.query(
+      `SELECT id, user_id, hidden_at, restored_at
+       FROM community_posts
+       WHERE id = $1 AND community_id = $2
+       FOR UPDATE`,
+      [postId, community.id]
+    );
+    const post = postRes.rows[0];
+    if (!post) {
+      await client.query('ROLLBACK');
+      return refuse(404, { error: REPORT_POST_NOT_FOUND_MESSAGE });
+    }
+    if (post.user_id === userId) {
+      await client.query('ROLLBACK');
+      return refuse(400, { error: REPORT_OWN_POST_MESSAGE });
+    }
+
+    // "perigoso" esconde sozinho só dentro da cota de 3 por pessoa em 24
+    // horas. Fora da cota, a denúncia vale como comum (entra nas 3 pessoas).
+    let fastTrack = false;
+    if (reason === URGENT_REASON) {
+      const quotaRes = await client.query(
+        `SELECT COUNT(*) AS total
+         FROM community_post_reports
+         WHERE reporter_id = $1
+           AND fast_track = true
+           AND created_at > NOW() - INTERVAL '24 hours'`,
+        [userId]
+      );
+      fastTrack = parseInt(quotaRes.rows[0].total) < FAST_TRACK_PER_DAY;
+    }
+
+    const insertRes = await client.query(
+      `INSERT INTO community_post_reports (post_id, reporter_id, reason, details, fast_track)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (post_id, reporter_id) DO NOTHING
+       RETURNING id`,
+      [postId, userId, reason, cleanDetails, fastTrack]
+    );
+    if (insertRes.rowCount !== 1) {
+      await client.query('ROLLBACK');
+      return refuse(409, { error: REPORT_DUPLICATE_MESSAGE, already_reported: true });
+    }
+
+    if (!post.hidden_at) {
+      const since = post.restored_at || null;
+      const countRes = await client.query(
+        `SELECT reason, fast_track, COUNT(*) AS total
+         FROM community_post_reports
+         WHERE post_id = $1
+           AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)
+         GROUP BY reason, fast_track`,
+        [postId, since]
+      );
+      if (shouldHide(countRes.rows)) {
+        await client.query(
+          `UPDATE community_posts
+           SET hidden_at = NOW(), hidden_reason = $2
+           WHERE id = $1 AND hidden_at IS NULL`,
+          [postId, pickHiddenReason(countRes.rows)]
+        );
+        // Marca as denúncias que contaram, para o alerta do admin.
+        await client.query(
+          `UPDATE community_post_reports
+           SET hid_post_at = NOW()
+           WHERE post_id = $1
+             AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)`,
+          [postId, since]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    if (crisisLevel) {
+      return res.status(201).json({
+        reported: true,
+        crisis: true,
+        crisis_level: crisisLevel,
+        message: REPORT_CRISIS_SAVED_MESSAGE
+      });
+    }
+    res.status(201).json({ reported: true, message: REPORT_DONE_MESSAGE });
+
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
+    }
+    // Sem log: nada do pedido (nem o comentário) vai para o console.
+    if (isMissingSchema(err)) return refuse(503, { error: REPORT_UNAVAILABLE_MESSAGE });
+    refuse(500, { error: REPORT_SERVER_ERROR_MESSAGE });
   } finally {
     if (client) client.release();
   }

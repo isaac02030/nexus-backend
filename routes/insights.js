@@ -1,6 +1,7 @@
 const express = require('express');
 const { Pool } = require('pg');
 const auth = require('../middleware/auth');
+const { ensureAdmin } = require('../lib/admin');
 const {
   countMissionDays,
   missionDayContextFor,
@@ -53,14 +54,6 @@ function progressWithWeekdays(row, clocks, now) {
     countMissionDays(currentDay, isMissionDay) - countMissionDays(lastDay, isMissionDay)
   );
   return { currentDay, missedDays };
-}
-
-function ensureAdmin(req, res) {
-  if (req.user.userId !== 1) {
-    res.status(403).json({ error: 'Esta area esta disponivel apenas para o admin.' });
-    return false;
-  }
-  return true;
 }
 
 router.get('/overview', auth, async (req, res) => {

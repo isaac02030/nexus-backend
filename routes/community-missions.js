@@ -6,9 +6,16 @@
 const express  = require('express');
 const { Pool } = require('pg');
 const auth     = require('../middleware/auth');
+const { makeAdultGate } = require('../lib/adult-gate');
 const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// Portão 18+ (lib/adult-gate.js): todas as rotas deste arquivo (ver, criar,
+// entrar, check-in, ranking e scope) exigem login e 18+ confirmado.
+// Sem a confirmação: 403 com code adult_confirmation_required.
+const { gate: adultGate } = makeAdultGate(db);
+router.use(adultGate);
 
 function communityMissionParticipantWhere(alias = 'cm', userParam = '$2') {
   return `EXISTS (

@@ -441,4 +441,51 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
     assert.equal(res.status, 200);
     assert.ok(db.queries.some((q) => /adult_confirmed FROM users WHERE id = \$1$/.test(q.text)));
   });
+
+  test('negado: sem 18+, toda rota da comunidade dá 403 com código (leitura e escrita)', async () => {
+    makeMember(1);
+    db.notAdult.add(1);
+    const t = tokenFor(1);
+    const calls = [
+      ['GET', '/api/communities'],
+      ['GET', '/api/communities/suggest/estudo'],
+      ['GET', '/api/communities/smart-suggest/5'],
+      ['GET', '/api/communities/foco'],
+      ['POST', '/api/communities', { name: 'Nova', category: 'estudo' }],
+      ['POST', '/api/communities/foco/join'],
+      ['POST', '/api/communities/foco/posts', { content: 'uma dica' }],
+      ['POST', '/api/communities/foco/posts/1/report', { reason: 'spam' }]
+    ];
+    for (const [method, path, body] of calls) {
+      const res = await request(method, path, { token: t, body });
+      assert.equal(res.status, 403, `${method} ${path}`);
+      assert.equal(res.body.code, 'adult_confirmation_required', `${method} ${path}`);
+    }
+    // Só a pergunta da idade chegou ao banco.
+    assert.ok(db.queries.every((q) => /adult_confirmed FROM users/.test(q.text)));
+  });
+
+  test('sem 18+ e texto de crise em qualquer rota: ajuda, nada segue nem é gravado', async () => {
+    db.notAdult.add(1);
+    const res = await request('POST', '/api/communities', {
+      token: tokenFor(1), body: { name: 'Nova', category: 'estudo', content: 'quero me matar' }
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.crisis, true);
+    assert.equal(res.body.saved, false);
+    assert.ok(db.queries.every((q) => /adult_confirmed FROM users/.test(q.text)));
+  });
+
+  test('rotas de admin ficam fora do portão 18+ (só o critério de admin vale)', async () => {
+    db.notAdult.add(1);
+    const res = await request('POST', '/api/communities/admin/posts/1/restore', { token: tokenFor(1) });
+    assert.notEqual(res.status, 403);
+    assert.equal(db.queries.some((q) => /adult_confirmed FROM users/.test(q.text)), false);
+  });
+
+  test('negado: sem login, o portão responde 401 antes de perguntar a idade', async () => {
+    const res = await request('GET', '/api/communities/foco');
+    assert.equal(res.status, 401);
+    assert.equal(db.queries.length, 0);
+  });
 });

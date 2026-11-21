@@ -27,6 +27,8 @@ test('005: uma denúncia por pessoa por post, motivos da lista e 280 caracteres'
   assert.match(sql, /char_length\(details\) <= 280/);
   assert.match(sql, /REFERENCES community_posts\(id\) ON DELETE CASCADE/);
   assert.match(sql, /REFERENCES users\(id\) ON DELETE CASCADE/);
+  assert.match(sql, /fast_track BOOLEAN NOT NULL DEFAULT FALSE/);
+  assert.match(sql, /hid_post_at TIMESTAMPTZ/);
 });
 
 test('005: a lista de motivos do banco é a mesma do servidor', () => {

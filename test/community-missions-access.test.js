@@ -20,7 +20,8 @@ const state = {
   communityMissions: [],
   participants: [],
   missions: [],
-  queries: []
+  queries: [],
+  notAdult: new Set()
 };
 
 function normalize(sql) {
@@ -41,6 +42,11 @@ function isCommunityParticipant(missionId, userId) {
 function handleQuery(sql, params = []) {
   const text = normalize(sql);
   state.queries.push({ text, params });
+
+  // 18+ confirmado no cadastro (todo mundo, menos quem está em notAdult).
+  if (/adult_confirmed FROM users WHERE id = \$1$/i.test(text)) {
+    return { rows: [{ adult_confirmed: !state.notAdult.has(Number(params[0])) }] };
+  }
 
   if (/^INSERT INTO checkins/i.test(text)) {
     return {
@@ -158,7 +164,8 @@ function mission(overrides) {
   };
 }
 
-function useState({ communityMissions = [], participants = [], missions = [] } = {}) {
+function useState({ communityMissions = [], participants = [], missions = [], notAdult = [] } = {}) {
+  state.notAdult = new Set(notAdult);
   state.communityMissions = communityMissions;
   state.participants = participants;
   state.missions = missions;
@@ -295,5 +302,48 @@ describe('acesso a missão de comunidade', { concurrency: 1 }, () => {
     assert.equal(duo.status, 201);
     assert.equal(duo.body.day, 1);
     assert.equal(duo.body.already_done, false);
+  });
+
+  // ---------- 18+ confirmado em todas as rotas de missão de comunidade ----------
+
+  test('negado: sem 18+ confirmado, todas as rotas dão 403 com código e nada é gravado', async () => {
+    useState({
+      communityMissions: [communityMission()],
+      participants: [participant({ user_id: 5 })],
+      notAdult: [5]
+    });
+    const t = tokenFor(5);
+    const calls = [
+      ['GET', '/api/community-missions/foco'],
+      ['POST', '/api/community-missions/foco', { title: 'x', mode: 'solo' }],
+      ['POST', '/api/community-missions/foco/40/join'],
+      ['POST', '/api/community-missions/foco/40/checkin'],
+      ['GET', '/api/community-missions/foco/40/ranking'],
+      ['GET', '/api/community-missions/foco/scope/mundial']
+    ];
+    for (const [method, path, body] of calls) {
+      const res = await request(method, path, { token: t, body });
+      assert.equal(res.status, 403, `${method} ${path}`);
+      assert.equal(res.body.code, 'adult_confirmation_required', `${method} ${path}`);
+    }
+    assert.equal(inserted('checkins'), false);
+    assert.equal(inserted('community_missions'), false);
+    assert.equal(inserted('community_mission_participants'), false);
+    assert.equal(listedRanking(), false);
+    // Só a pergunta da idade chegou ao banco.
+    assert.ok(state.queries.every((q) => /adult_confirmed FROM users/.test(q.text)));
+  });
+
+  test('negado: sem login continua 401 antes do portão', async () => {
+    useState({ communityMissions: [communityMission()], participants: [participant()] });
+    const res = await request('GET', '/api/community-missions/foco/40/ranking');
+    assert.equal(res.status, 401);
+    assert.equal(state.queries.length, 0);
+  });
+
+  test('o check-in pessoal (/api/checkins) não depende do 18+ da comunidade', async () => {
+    useState({ missions: [mission()], notAdult: [1] });
+    const solo = await request('POST', '/api/checkins', { token: tokenFor(1), body: { mission_id: 11 } });
+    assert.equal(solo.status, 201);
   });
 });

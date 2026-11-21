@@ -37,12 +37,22 @@ CREATE TABLE IF NOT EXISTS community_post_reports (
   reason VARCHAR(20) NOT NULL
     CHECK (reason IN ('perigoso', 'ofensa', 'improprio', 'spam', 'outro')),
   details TEXT CHECK (details IS NULL OR char_length(details) <= 280),
+  -- true = denúncia "perigoso" que esconde sozinha. Cada pessoa tem no
+  -- máximo 3 dessas a cada 24 horas; a partir da 4.ª, fica false e conta
+  -- como denúncia comum (entra nas 3 pessoas).
+  fast_track BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Quando o post foi escondido com esta denúncia contando. Serve ao alerta
+  -- do admin "a mesma pessoa escondeu 2 ou mais posts em 24 horas".
+  hid_post_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (post_id, reporter_id)
 );
 
 COMMENT ON TABLE community_post_reports IS
   'Uma denúncia por pessoa por post. Com 3 pessoas diferentes, ou 1 com o motivo perigoso, o post fica escondido.';
+
+CREATE INDEX IF NOT EXISTS idx_community_post_reports_reporter
+  ON community_post_reports(reporter_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_community_posts_hidden
   ON community_posts(hidden_at) WHERE hidden_at IS NOT NULL;

@@ -9,8 +9,11 @@ const auth     = require('../middleware/auth');
 const { classifyNote } = require('../lib/crisis-filter');
 const { NOTE_MAX_CHARS, noteLength } = require('../lib/note-limit');
 const { ensureAdmin } = require('../lib/admin');
+const { makeAdultGate, adultRequiredBody } = require('../lib/adult-gate');
 const {
   URGENT_REASON,
+  FAST_TRACK_PER_DAY,
+  REPEAT_ALERT_POSTS,
   isValidReason,
   reasonLabel,
   pickHiddenReason,
@@ -56,26 +59,8 @@ const MOD_NOT_HIDDEN_MESSAGE = 'Este post não está escondido.';
 const MOD_UNAVAILABLE_MESSAGE = 'A moderação ainda não está disponível: falta aplicar a migração 005.';
 const MOD_SERVER_ERROR_MESSAGE = 'Não deu para concluir agora. Tente de novo daqui a pouco.';
 
-// Comunidade só para quem confirmou 18+ no cadastro (users.adult_confirmed_at).
-// Lido por to_jsonb: sem a migração 006, ninguém aparece confirmado e a
-// comunidade fica fechada (falha para o lado seguro).
-const ADULT_REQUIRED_CODE = 'adult_confirmation_required';
-const ADULT_REQUIRED_MESSAGE = 'A comunidade é só para maiores de 18 anos. Confirme sua idade para entrar, publicar ou denunciar.';
-const ADULT_REQUIRED_BODY = Object.freeze({
-  error: ADULT_REQUIRED_MESSAGE,
-  code: ADULT_REQUIRED_CODE,
-  adult_confirmation_required: true
-});
-
-async function hasAdultConfirmation(userId) {
-  const result = await db.query(
-    `SELECT (to_jsonb(users) ->> 'adult_confirmed_at') IS NOT NULL AS adult_confirmed
-     FROM users
-     WHERE id = $1`,
-    [userId]
-  );
-  return result.rows[0]?.adult_confirmed === true;
-}
+// Portão 18+ (lib/adult-gate.js): vale para tudo daqui, menos o admin.
+const { hasAdultConfirmation, gate: adultGate } = makeAdultGate(db);
 
 // Coluna ou tabela que ainda não existe (migração não aplicada).
 function isMissingSchema(err) {
@@ -139,6 +124,117 @@ function getRank(missionsDone) {
   if (missionsDone >= 1)  return 'veterano';
   return 'recruta';
 }
+
+// ============================================
+// MODERAÇÃO (só admin, o mesmo critério de routes/insights.js)
+// GET    /api/communities/admin/hidden-posts           → posts escondidos
+// POST   /api/communities/admin/posts/:postId/restore  → volta a aparecer
+// DELETE /api/communities/admin/posts/:postId          → apaga de vez
+// Ficam antes do portão 18+ e de /:slug. Quem denunciou não aparece: só
+// motivo, comentário e alertas.
+// ============================================
+router.get('/admin/hidden-posts', auth, async (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  try {
+    const result = await db.query(
+      `SELECT cp.id, cp.community_id, c.slug AS community_slug, cp.user_id,
+              u.username, cp.content, cp.created_at, cp.hidden_at, cp.hidden_reason,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                         'reason', r.reason,
+                         'details', r.details,
+                         'created_at', r.created_at
+                       ) ORDER BY r.created_at)
+                FROM community_post_reports r
+                WHERE r.post_id = cp.id
+              ), '[]'::json) AS reports,
+              EXISTS (
+                SELECT 1 FROM community_post_reports r2
+                WHERE r2.post_id = cp.id AND r2.reason = $1
+              ) AS urgent,
+              EXISTS (
+                SELECT 1 FROM community_post_reports r3
+                WHERE r3.post_id = cp.id
+                  AND r3.hid_post_at IS NOT NULL
+                  AND (
+                    SELECT COUNT(DISTINCT r4.post_id)
+                    FROM community_post_reports r4
+                    WHERE r4.reporter_id = r3.reporter_id
+                      AND r4.hid_post_at > NOW() - INTERVAL '24 hours'
+                  ) >= $2
+              ) AS repeat_reporter_alert
+       FROM community_posts cp
+       JOIN communities c ON c.id = cp.community_id
+       JOIN users u ON u.id = cp.user_id
+       WHERE cp.hidden_at IS NOT NULL
+       ORDER BY urgent DESC, cp.hidden_at ASC
+       LIMIT 100`,
+      [URGENT_REASON, REPEAT_ALERT_POSTS]
+    );
+    // Prioridade alta: alguma denúncia "perigoso" (saúde). Vêm primeiro.
+    // repeat_reporter_alert: alguém que ajudou a esconder este post escondeu
+    // 2 ou mais posts nas últimas 24 horas. Só o alerta, nunca quem é.
+    res.json({
+      posts: result.rows.map(({ urgent, ...post }) => ({
+        ...post,
+        priority: urgent ? 'alta' : 'normal',
+        hidden_reason_label: reasonLabel(post.hidden_reason)
+      }))
+    });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: MOD_UNAVAILABLE_MESSAGE });
+    res.status(500).json({ error: MOD_SERVER_ERROR_MESSAGE });
+  }
+});
+
+router.post('/admin/posts/:postId/restore', auth, async (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  const postId = parsePostId(req.params.postId);
+  if (!postId) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
+  try {
+    // restored_at: daqui em diante só contam denúncias novas.
+    const result = await db.query(
+      `UPDATE community_posts
+       SET hidden_at = NULL, hidden_reason = NULL, restored_at = NOW()
+       WHERE id = $1 AND hidden_at IS NOT NULL
+       RETURNING id`,
+      [postId]
+    );
+    if (result.rowCount === 1) {
+      return res.json({ restored: true, post_id: postId });
+    }
+    const exists = await db.query('SELECT id FROM community_posts WHERE id = $1', [postId]);
+    if (!exists.rows[0]) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
+    res.status(409).json({ error: MOD_NOT_HIDDEN_MESSAGE });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: MOD_UNAVAILABLE_MESSAGE });
+    res.status(500).json({ error: MOD_SERVER_ERROR_MESSAGE });
+  }
+});
+
+router.delete('/admin/posts/:postId', auth, async (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  const postId = parsePostId(req.params.postId);
+  if (!postId) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
+  try {
+    // As denúncias do post saem junto (ON DELETE CASCADE da migração 005).
+    const result = await db.query(
+      'DELETE FROM community_posts WHERE id = $1 RETURNING id',
+      [postId]
+    );
+    if (result.rowCount !== 1) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
+    res.json({ deleted: true, post_id: postId });
+  } catch (err) {
+    res.status(500).json({ error: MOD_SERVER_ERROR_MESSAGE });
+  }
+});
+
+// ============================================
+// PORTÃO 18+: daqui para baixo, tudo da comunidade (listar, sugerir, ver,
+// entrar, publicar, denunciar, criar) exige login e 18+ confirmado.
+// Sem a confirmação: 403 com code adult_confirmation_required.
+// ============================================
+router.use(adultGate);
 
 // ============================================
 // LISTAR COMUNIDADES
@@ -304,96 +400,6 @@ router.get('/smart-suggest/:missionId', auth, async (req, res) => {
 });
 
 // ============================================
-// MODERAÇÃO (só admin, o mesmo critério de routes/insights.js)
-// GET    /api/communities/admin/hidden-posts           → posts escondidos
-// POST   /api/communities/admin/posts/:postId/restore  → volta a aparecer
-// DELETE /api/communities/admin/posts/:postId          → apaga de vez
-// Ficam antes de /:slug. Quem denunciou não aparece: só motivo e comentário.
-// ============================================
-router.get('/admin/hidden-posts', auth, async (req, res) => {
-  if (!ensureAdmin(req, res)) return;
-  try {
-    const result = await db.query(
-      `SELECT cp.id, cp.community_id, c.slug AS community_slug, cp.user_id,
-              u.username, cp.content, cp.created_at, cp.hidden_at, cp.hidden_reason,
-              COALESCE((
-                SELECT json_agg(json_build_object(
-                         'reason', r.reason,
-                         'details', r.details,
-                         'created_at', r.created_at
-                       ) ORDER BY r.created_at)
-                FROM community_post_reports r
-                WHERE r.post_id = cp.id
-              ), '[]'::json) AS reports,
-              EXISTS (
-                SELECT 1 FROM community_post_reports r2
-                WHERE r2.post_id = cp.id AND r2.reason = $1
-              ) AS urgent
-       FROM community_posts cp
-       JOIN communities c ON c.id = cp.community_id
-       JOIN users u ON u.id = cp.user_id
-       WHERE cp.hidden_at IS NOT NULL
-       ORDER BY urgent DESC, cp.hidden_at ASC
-       LIMIT 100`,
-      [URGENT_REASON]
-    );
-    // Prioridade alta: alguma denúncia "perigoso" (saúde). Vêm primeiro.
-    res.json({
-      posts: result.rows.map(({ urgent, ...post }) => ({
-        ...post,
-        priority: urgent ? 'alta' : 'normal',
-        hidden_reason_label: reasonLabel(post.hidden_reason)
-      }))
-    });
-  } catch (err) {
-    if (isMissingSchema(err)) return res.status(503).json({ error: MOD_UNAVAILABLE_MESSAGE });
-    res.status(500).json({ error: MOD_SERVER_ERROR_MESSAGE });
-  }
-});
-
-router.post('/admin/posts/:postId/restore', auth, async (req, res) => {
-  if (!ensureAdmin(req, res)) return;
-  const postId = parsePostId(req.params.postId);
-  if (!postId) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
-  try {
-    // restored_at: daqui em diante só contam denúncias novas.
-    const result = await db.query(
-      `UPDATE community_posts
-       SET hidden_at = NULL, hidden_reason = NULL, restored_at = NOW()
-       WHERE id = $1 AND hidden_at IS NOT NULL
-       RETURNING id`,
-      [postId]
-    );
-    if (result.rowCount === 1) {
-      return res.json({ restored: true, post_id: postId });
-    }
-    const exists = await db.query('SELECT id FROM community_posts WHERE id = $1', [postId]);
-    if (!exists.rows[0]) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
-    res.status(409).json({ error: MOD_NOT_HIDDEN_MESSAGE });
-  } catch (err) {
-    if (isMissingSchema(err)) return res.status(503).json({ error: MOD_UNAVAILABLE_MESSAGE });
-    res.status(500).json({ error: MOD_SERVER_ERROR_MESSAGE });
-  }
-});
-
-router.delete('/admin/posts/:postId', auth, async (req, res) => {
-  if (!ensureAdmin(req, res)) return;
-  const postId = parsePostId(req.params.postId);
-  if (!postId) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
-  try {
-    // As denúncias do post saem junto (ON DELETE CASCADE da migração 005).
-    const result = await db.query(
-      'DELETE FROM community_posts WHERE id = $1 RETURNING id',
-      [postId]
-    );
-    if (result.rowCount !== 1) return res.status(404).json({ error: MOD_POST_NOT_FOUND_MESSAGE });
-    res.json({ deleted: true, post_id: postId });
-  } catch (err) {
-    res.status(500).json({ error: MOD_SERVER_ERROR_MESSAGE });
-  }
-});
-
-// ============================================
 // VER COMUNIDADE
 // GET /api/communities/:slug
 // ============================================
@@ -478,10 +484,6 @@ router.post('/:slug/join', auth, async (req, res) => {
   const userId = req.user.userId;
 
   try {
-    if (!(await hasAdultConfirmation(userId))) {
-      return res.status(403).json({ ...ADULT_REQUIRED_BODY });
-    }
-
     const commRes = await db.query(
       'SELECT * FROM communities WHERE slug = $1',
       [req.params.slug]
@@ -572,10 +574,6 @@ router.post('/:slug/posts', auth, async (req, res) => {
 
   let client;
   try {
-    if (!(await hasAdultConfirmation(userId))) {
-      return res.status(403).json({ ...ADULT_REQUIRED_BODY });
-    }
-
     const commRes = await db.query(
       'SELECT * FROM communities WHERE slug = $1',
       [req.params.slug]
@@ -695,8 +693,10 @@ router.post('/:slug/posts/:postId/report', auth, async (req, res) => {
 
   let client;
   try {
+    // O portão 18+ já barrou antes; esta conferência é uma segunda trava
+    // antes de gravar a denúncia.
     if (!(await hasAdultConfirmation(userId))) {
-      return refuse(403, { ...ADULT_REQUIRED_BODY });
+      return refuse(403, adultRequiredBody());
     }
 
     const commRes = await db.query(
@@ -714,6 +714,11 @@ router.post('/:slug/posts/:postId/report', auth, async (req, res) => {
 
     client = await db.connect();
     await client.query('BEGIN');
+
+    // Trava a pessoa primeiro (a cota de "perigoso" não passa de 3 com
+    // pedidos ao mesmo tempo) e depois o post. Sempre nessa ordem, como na
+    // rota de posts, que só trava a pessoa.
+    await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
 
     // Trava o post: duas denúncias ao mesmo tempo não passam do número
     // sem esconder, nem escondem duas vezes.
@@ -734,12 +739,27 @@ router.post('/:slug/posts/:postId/report', auth, async (req, res) => {
       return refuse(400, { error: REPORT_OWN_POST_MESSAGE });
     }
 
+    // "perigoso" esconde sozinho só dentro da cota de 3 por pessoa em 24
+    // horas. Fora da cota, a denúncia vale como comum (entra nas 3 pessoas).
+    let fastTrack = false;
+    if (reason === URGENT_REASON) {
+      const quotaRes = await client.query(
+        `SELECT COUNT(*) AS total
+         FROM community_post_reports
+         WHERE reporter_id = $1
+           AND fast_track = true
+           AND created_at > NOW() - INTERVAL '24 hours'`,
+        [userId]
+      );
+      fastTrack = parseInt(quotaRes.rows[0].total) < FAST_TRACK_PER_DAY;
+    }
+
     const insertRes = await client.query(
-      `INSERT INTO community_post_reports (post_id, reporter_id, reason, details)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO community_post_reports (post_id, reporter_id, reason, details, fast_track)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (post_id, reporter_id) DO NOTHING
        RETURNING id`,
-      [postId, userId, reason, cleanDetails]
+      [postId, userId, reason, cleanDetails, fastTrack]
     );
     if (insertRes.rowCount !== 1) {
       await client.query('ROLLBACK');
@@ -747,13 +767,14 @@ router.post('/:slug/posts/:postId/report', auth, async (req, res) => {
     }
 
     if (!post.hidden_at) {
+      const since = post.restored_at || null;
       const countRes = await client.query(
-        `SELECT reason, COUNT(*) AS total
+        `SELECT reason, fast_track, COUNT(*) AS total
          FROM community_post_reports
          WHERE post_id = $1
            AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)
-         GROUP BY reason`,
-        [postId, post.restored_at || null]
+         GROUP BY reason, fast_track`,
+        [postId, since]
       );
       if (shouldHide(countRes.rows)) {
         await client.query(
@@ -761,6 +782,14 @@ router.post('/:slug/posts/:postId/report', auth, async (req, res) => {
            SET hidden_at = NOW(), hidden_reason = $2
            WHERE id = $1 AND hidden_at IS NULL`,
           [postId, pickHiddenReason(countRes.rows)]
+        );
+        // Marca as denúncias que contaram, para o alerta do admin.
+        await client.query(
+          `UPDATE community_post_reports
+           SET hid_post_at = NOW()
+           WHERE post_id = $1
+             AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)`,
+          [postId, since]
         );
       }
     }

@@ -78,26 +78,55 @@ function handle(sql, params = []) {
     return { rows: p ? [{ id: p.id, user_id: p.user_id, hidden_at: p.hidden_at, restored_at: p.restored_at }] : [] };
   }
 
+  if (/^SELECT id FROM users WHERE id = \$1 FOR UPDATE$/i.test(text)) {
+    return { rows: [{ id: Number(params[0]) }] };
+  }
+
+  // Cota de "perigoso" da pessoa nas últimas 24 horas (old = fora da janela).
+  if (/FROM community_post_reports WHERE reporter_id = \$1 AND fast_track = true/i.test(text)) {
+    if (db.missingSchema) throw missing();
+    const total = db.reports.filter((r) => r.reporter_id === params[0] && r.fast_track && !r.old).length;
+    return { rows: [{ total: String(total) }] };
+  }
+
   if (/^INSERT INTO community_post_reports/i.test(text)) {
     if (db.missingSchema) throw missing();
-    const [postId, reporterId, reason, details] = params;
+    const [postId, reporterId, reason, details, fastTrack] = params;
     if (db.reports.some((r) => r.post_id === postId && r.reporter_id === reporterId)) {
       return { rows: [], rowCount: 0 };
     }
     db.clock += 1;
-    db.reports.push({ post_id: postId, reporter_id: reporterId, reason, details, created_at: db.clock });
+    db.reports.push({ post_id: postId, reporter_id: reporterId, reason, details, fast_track: fastTrack, hid_post_at: null, created_at: db.clock });
     return { rows: [{ id: db.reports.length }], rowCount: 1 };
   }
 
-  if (/FROM community_post_reports WHERE post_id = \$1 AND/i.test(text) && /GROUP BY reason/i.test(text)) {
+  if (/^UPDATE community_post_reports SET hid_post_at = NOW\(\)/i.test(text)) {
+    db.clock += 1;
+    let n = 0;
+    for (const r of db.reports) {
+      if (r.post_id !== params[0]) continue;
+      if (params[1] != null && !(r.created_at > params[1])) continue;
+      r.hid_post_at = db.clock;
+      n += 1;
+    }
+    return { rows: [], rowCount: n };
+  }
+
+  if (/FROM community_post_reports WHERE post_id = \$1 AND/i.test(text) && /GROUP BY reason, fast_track/i.test(text)) {
     const since = params[1];
     const counts = new Map();
     for (const r of db.reports) {
       if (r.post_id !== params[0]) continue;
       if (since != null && !(r.created_at > since)) continue;
-      counts.set(r.reason, (counts.get(r.reason) || 0) + 1);
+      const key = `${r.reason}|${r.fast_track}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
     }
-    return { rows: [...counts].map(([reason, total]) => ({ reason, total: String(total) })) };
+    return {
+      rows: [...counts].map(([key, total]) => {
+        const [reason, fast] = key.split('|');
+        return { reason, fast_track: fast === 'true', total: String(total) };
+      })
+    };
   }
 
   if (/^UPDATE community_posts SET hidden_at = NOW\(\), hidden_reason = \$2/i.test(text)) {
@@ -150,7 +179,13 @@ function handle(sql, params = []) {
       hidden_reason: p.hidden_reason,
       reports: db.reports.filter((r) => r.post_id === p.id)
         .map((r) => ({ reason: r.reason, details: r.details, created_at: r.created_at })),
-      urgent: db.reports.some((r) => r.post_id === p.id && r.reason === params[0])
+      urgent: db.reports.some((r) => r.post_id === p.id && r.reason === params[0]),
+      // Alguém que contou para esconder este post escondeu >= params[1]
+      // posts nas últimas 24 horas (oldHide = fora da janela).
+      repeat_reporter_alert: db.reports.some((r) => r.post_id === p.id && r.hid_post_at != null
+        && new Set(db.reports
+          .filter((x) => x.reporter_id === r.reporter_id && x.hid_post_at != null && !x.oldHide)
+          .map((x) => x.post_id)).size >= params[1])
     }));
     // ORDER BY urgent DESC, hidden_at ASC
     rows.sort((a, b) => (Number(b.urgent) - Number(a.urgent)) || (a.hidden_at - b.hidden_at));
@@ -258,8 +293,12 @@ describe('comunidade: denúncia, post escondido e moderação', { concurrency: 1
     assert.equal(HIDE_AFTER_REPORTS, 3);
     assert.equal(shouldHide([{ reason: 'spam', total: '2' }]), false);
     assert.equal(shouldHide([{ reason: 'spam', total: '2' }, { reason: 'ofensa', total: '1' }]), true);
-    assert.equal(shouldHide([{ reason: 'perigoso', total: '1' }]), true);
-    assert.equal(pickHiddenReason([{ reason: 'spam', total: '2' }, { reason: 'perigoso', total: '1' }]), 'perigoso');
+    assert.equal(shouldHide([{ reason: 'perigoso', fast_track: true, total: '1' }]), true);
+    // "perigoso" fora da cota vale como comum.
+    assert.equal(shouldHide([{ reason: 'perigoso', fast_track: false, total: '1' }]), false);
+    assert.equal(shouldHide([{ reason: 'perigoso', fast_track: false, total: '1' }, { reason: 'spam', total: '2' }]), true);
+    assert.equal(pickHiddenReason([{ reason: 'spam', total: '2' }, { reason: 'perigoso', fast_track: true, total: '1' }]), 'perigoso');
+    assert.equal(pickHiddenReason([{ reason: 'spam', total: '2' }, { reason: 'perigoso', fast_track: false, total: '1' }]), 'spam');
   });
 
   test('motivo escondido: o mais citado; no empate, o mais grave', () => {
@@ -502,7 +541,10 @@ describe('comunidade: denúncia, post escondido e moderação', { concurrency: 1
     assert.equal(post.reports[0].details, 'link de loja');
     assert.equal(JSON.stringify(res.body).includes('reporter_id'), false);
     const listQuery = db.queries.find((q) => /WHERE cp\.hidden_at IS NOT NULL/.test(q.text));
-    assert.doesNotMatch(listQuery.text, /reporter_id/);
+    // reporter_id só é usado dentro do alerta (EXISTS), nunca vai para a resposta.
+    const built = /json_build_object\(([^)]*)\)/.exec(listQuery.text)[1];
+    assert.doesNotMatch(built, /reporter/);
+    assert.doesNotMatch(listQuery.text.split(' FROM community_posts cp ')[0].replace(/EXISTS \(.*?\) AS (urgent|repeat_reporter_alert)/g, ''), /reporter_id/);
   });
 
   test('admin restaura: volta a aparecer e só denúncias novas contam', async () => {
@@ -573,7 +615,8 @@ describe('comunidade: denúncia, post escondido e moderação', { concurrency: 1
     const res = await report(5, { details: 'quero me matar' });
     assert.equal(res.status, 200);
     assert.equal(res.body.crisis, true);
-    assert.equal(res.body.reported, false);
+    assert.equal(res.body.saved, false);
+    assert.equal(res.body.code, 'adult_confirmation_required');
     assert.equal(db.reports.length, 0);
   });
 
@@ -627,7 +670,7 @@ describe('comunidade: denúncia, post escondido e moderação', { concurrency: 1
     assert.equal('urgent' in res.body.posts[0], false);
     assert.equal(JSON.stringify(res.body).includes('reporter_id'), false);
     const listQuery = db.queries.find((q) => /WHERE cp\.hidden_at IS NOT NULL/.test(q.text));
-    assert.deepEqual(listQuery.params, ['perigoso']);
+    assert.deepEqual(listQuery.params, ['perigoso', 2]);
     assert.match(listQuery.text, /ORDER BY urgent DESC, cp\.hidden_at ASC/);
   });
 
@@ -639,6 +682,107 @@ describe('comunidade: denúncia, post escondido e moderação', { concurrency: 1
     assert.equal(db.posts.find((p) => p.id === 10).hidden_at, null);
     await report(6, { reason: 'perigoso' });
     assert.notEqual(db.posts.find((p) => p.id === 10).hidden_at, null);
+  });
+
+  // ---------- salvaguardas do "perigoso" ----------
+
+  function addPosts(...ids) {
+    for (const id of ids) {
+      db.posts.push({ id, community_id: 3, user_id: AUTHOR, content: `post ${id}`, created_at: '2026-11-21T12:00:00Z', hidden_at: null, hidden_reason: null, restored_at: null });
+    }
+  }
+  const hiddenNow = (id) => db.posts.find((p) => p.id === id).hidden_at != null;
+
+  test('cota: 3 "perigoso" por pessoa em 24 h escondem; a 4.ª não esconde sozinha', async () => {
+    addMember(5);
+    addPosts(20, 21, 22, 23);
+    for (const id of [20, 21, 22]) {
+      assert.equal((await report(5, { postId: id, reason: 'perigoso' })).status, 201);
+      assert.equal(hiddenNow(id), true, `post ${id}`);
+    }
+    const fourth = await report(5, { postId: 23, reason: 'perigoso' });
+    assert.equal(fourth.status, 201, 'a denúncia é aceita do mesmo jeito');
+    assert.equal(fourth.body.message, 'Obrigado. Sua denúncia foi registrada.');
+    assert.equal(hiddenNow(23), false);
+    const r = db.reports.find((x) => x.post_id === 23);
+    assert.equal(r.reason, 'perigoso', 'o motivo escolhido fica guardado');
+    assert.equal(r.fast_track, false);
+  });
+
+  test('cota: a 4.ª "perigoso" conta como comum e entra nas 3 pessoas', async () => {
+    for (const id of [5, 6, 7]) addMember(id);
+    addPosts(20, 21, 22, 23);
+    for (const id of [20, 21, 22]) await report(5, { postId: id, reason: 'perigoso' });
+    await report(5, { postId: 23, reason: 'perigoso' });
+    await report(6, { postId: 23, reason: 'spam' });
+    assert.equal(hiddenNow(23), false);
+    await report(7, { postId: 23, reason: 'spam' });
+    assert.equal(hiddenNow(23), true);
+    assert.equal(db.posts.find((p) => p.id === 23).hidden_reason, 'spam');
+  });
+
+  test('cota: "perigoso" de mais de 24 h atrás não conta', async () => {
+    addMember(5);
+    addPosts(20);
+    for (const id of [91, 92, 93]) {
+      db.reports.push({ post_id: id, reporter_id: 5, reason: 'perigoso', details: null, fast_track: true, hid_post_at: null, created_at: 1, old: true });
+    }
+    await report(5, { postId: 20, reason: 'perigoso' });
+    assert.equal(hiddenNow(20), true);
+  });
+
+  test('cota: trava a pessoa, depois o post, e só então conta a cota e grava', async () => {
+    addMember(5);
+    await report(5, { reason: 'perigoso' });
+    const texts = db.queries.map((q) => q.text);
+    const lockUser = texts.findIndex((t) => /FROM users WHERE id = \$1 FOR UPDATE/.test(t));
+    const lockPost = texts.findIndex((t) => /FROM community_posts WHERE id = \$1 AND community_id = \$2 FOR UPDATE/.test(t));
+    const quota = texts.findIndex((t) => /fast_track = true AND created_at > NOW\(\) - INTERVAL '24 hours'/.test(t));
+    const insert = texts.findIndex((t) => /^INSERT INTO community_post_reports/.test(t));
+    assert.ok(lockUser >= 0 && lockUser < lockPost && lockPost < quota && quota < insert);
+  });
+
+  test('cota: outros motivos nem consultam a cota', async () => {
+    addMember(5);
+    await report(5, { reason: 'ofensa' });
+    assert.equal(db.queries.some((q) => /fast_track = true AND created_at/.test(q.text)), false);
+    assert.equal(db.reports[0].fast_track, false);
+  });
+
+  test('alerta do admin: quem escondeu 2 posts em 24 h marca os dois, sem dizer quem', async () => {
+    for (const id of [5, 6, 7, 8]) addMember(id);
+    addPosts(20, 21, 22);
+    await report(5, { postId: 20, reason: 'perigoso' });
+    await report(5, { postId: 21, reason: 'perigoso' });
+    // Post 22 escondido por 3 outras pessoas, nenhuma repetida.
+    for (const id of [6, 7, 8]) await report(id, { postId: 22, reason: 'spam' });
+
+    const res = await request('GET', '/api/communities/admin/hidden-posts', { token: tokenFor(ADMIN) });
+    assert.equal(res.status, 200);
+    const byId = Object.fromEntries(res.body.posts.map((p) => [p.id, p.repeat_reporter_alert]));
+    assert.deepEqual(byId, { 20: true, 21: true, 22: false });
+    assert.equal(JSON.stringify(res.body).includes('reporter_id'), false);
+    // Nenhum campo com id ou nome de quem denunciou: só motivo, comentário e hora.
+    for (const post of res.body.posts) {
+      for (const r of post.reports) assert.deepEqual(Object.keys(r).sort(), ['created_at', 'details', 'reason']);
+    }
+  });
+
+  test('alerta do admin: 1 post escondido por pessoa não acende', async () => {
+    addMember(5);
+    addPosts(20);
+    await report(5, { postId: 20, reason: 'perigoso' });
+    const res = await request('GET', '/api/communities/admin/hidden-posts', { token: tokenFor(ADMIN) });
+    assert.equal(res.body.posts[0].repeat_reporter_alert, false);
+  });
+
+  test('alerta do admin: posts escondidos há mais de 24 h não contam', async () => {
+    addMember(5);
+    addPosts(20);
+    db.reports.push({ post_id: 99, reporter_id: 5, reason: 'perigoso', details: null, fast_track: true, hid_post_at: 1, created_at: 1, old: true, oldHide: true });
+    await report(5, { postId: 20, reason: 'perigoso' });
+    const res = await request('GET', '/api/communities/admin/hidden-posts', { token: tokenFor(ADMIN) });
+    assert.equal(res.body.posts.find((p) => p.id === 20).repeat_reporter_alert, false);
   });
 
   test('rotas de admin vêm antes de /:slug', () => {

@@ -1,5 +1,5 @@
 const express = require('express');
-const { Pool } = require('pg');
+const { db } = require('../lib/db');
 const auth = require('../middleware/auth');
 const { ensureAdmin } = require('../lib/admin');
 const {
@@ -10,8 +10,6 @@ const {
 } = require('../lib/mission-days');
 
 const router = express.Router();
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
-
 // Dias da missão nos insights.
 // Missão sem dias escolhidos (NULL, ou a migração 004 ainda não aplicada):
 // os números saem do SQL, como sempre. Com dias escolhidos, o "dia atual"

@@ -13,7 +13,7 @@
 
 const express = require('express');
 const webpush = require('web-push');
-const { Pool } = require('pg');
+const { db } = require('../lib/db');
 const auth = require('../middleware/auth');
 const {
   CHECKED_IN_ON_LOCAL_DATE_SQL,
@@ -27,7 +27,6 @@ const {
 const { missionDayChecker, startWeekdayFor } = require('../lib/mission-days');
 
 const router = express.Router();
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
 if (process.env.NODE_ENV !== 'test') {
   webpush.setVapidDetails(
@@ -38,6 +37,7 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 let reminderSchedulerStarted = false;
+const reminderTimers = [];
 let reminderSweepRunning = false;
 
 router.get('/vapid-key', (req, res) => {
@@ -159,28 +159,6 @@ function buildReminderCopy(kind, mission, dayNumber, options = {}) {
   }
 }
 
-async function ensureReminderLogTable() {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS notification_log (
-      id SERIAL PRIMARY KEY,
-      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      mission_id INTEGER NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
-      kind VARCHAR(40) NOT NULL,
-      sent_on DATE NOT NULL DEFAULT CURRENT_DATE,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      UNIQUE (user_id, mission_id, kind, sent_on)
-    )
-  `);
-}
-
-async function ensureUserReminderColumns() {
-  await db.query(`
-    ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS reminder_time TIME,
-      ADD COLUMN IF NOT EXISTS timezone TEXT
-  `);
-}
-
 async function markReminderSent(userId, missionId, kind, sentOn = null) {
   if (sentOn) {
     await db.query(
@@ -286,9 +264,6 @@ async function runReminderSweep(now = new Date()) {
   reminderSweepRunning = true;
 
   try {
-    await ensureUserReminderColumns();
-    await ensureReminderLogTable();
-
     // mission_weekdays via to_jsonb: NULL (todos os dias) enquanto a
     // migracao 004 nao estiver aplicada, sem quebrar a consulta.
     const missionsRes = await db.query(`
@@ -383,14 +358,15 @@ function startReminderScheduler() {
   if (reminderSchedulerStarted) return;
   reminderSchedulerStarted = true;
 
-  ensureUserReminderColumns()
-    .then(() => ensureReminderLogTable())
-    .catch(err => {
-      console.error('Erro ao preparar lembretes:', err.message);
-    });
+  reminderTimers.push(setTimeout(runReminderSweep, 20000));
+  reminderTimers.push(setInterval(runReminderSweep, 15 * 60 * 1000));
+}
 
-  setTimeout(runReminderSweep, 20000);
-  setInterval(runReminderSweep, 15 * 60 * 1000);
+// Para os lembretes no desligamento (antes de fechar o Pool).
+function stopReminderScheduler() {
+  for (const timer of reminderTimers) clearTimeout(timer);
+  reminderTimers.length = 0;
+  reminderSchedulerStarted = false;
 }
 
 router.post('/checkin', auth, async (req, res) => {
@@ -457,4 +433,4 @@ if (process.env.NODE_ENV !== 'test') {
   startReminderScheduler();
 }
 
-module.exports = { router, sendNotification, runReminderSweep };
+module.exports = { router, sendNotification, runReminderSweep, stopReminderScheduler };

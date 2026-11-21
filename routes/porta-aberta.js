@@ -4,11 +4,9 @@
 // ============================================
 
 const express  = require('express');
-const { Pool } = require('pg');
+const { db } = require('../lib/db');
 const auth     = require('../middleware/auth');
 const router   = express.Router();
-
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // ============================================
 // ABRIR A PORTA

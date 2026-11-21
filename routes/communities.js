@@ -4,7 +4,7 @@
 // ============================================
 
 const express  = require('express');
-const { Pool } = require('pg');
+const { db } = require('../lib/db');
 const auth     = require('../middleware/auth');
 const { classifyNote } = require('../lib/crisis-filter');
 const { NOTE_MAX_CHARS, noteLength } = require('../lib/note-limit');
@@ -21,8 +21,6 @@ const {
   hiddenMessage
 } = require('../lib/post-reports');
 const router   = express.Router();
-
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // Posts do fórum: mesmo limite de tamanho da frase do check-in (280
 // caracteres reais) e no máximo 3 posts por pessoa a cada 24 horas,

@@ -4,12 +4,10 @@
 // ============================================
 
 const express  = require('express');
-const { Pool } = require('pg');
+const { db } = require('../lib/db');
 const auth     = require('../middleware/auth');
 const { makeAdultGate } = require('../lib/adult-gate');
 const router   = express.Router();
-
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // Portão 18+ (lib/adult-gate.js): todas as rotas deste arquivo (ver, criar,
 // entrar, check-in, ranking e scope) exigem login e 18+ confirmado.

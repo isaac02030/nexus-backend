@@ -15,13 +15,15 @@ test('a migração 003 só acrescenta is_difficult com padrão falso', () => {
   assert.match(sql, /003_checkin_difficult_day/);
 });
 
-test('database.sql aplica 001, 002, 003 e 004 nessa ordem', () => {
+test('database.sql aplica 001 a 006 nessa ordem', () => {
   const bootstrap = fs.readFileSync(path.join(root, 'database.sql'), 'utf8');
   const order = [...bootstrap.matchAll(/\\ir migrations\/(\d{3}_[a-z0-9_]+\.sql)/g)].map(match => match[1]);
   assert.deepEqual(order, [
     '001_initial_schema.sql',
     '002_user_reminder.sql',
     '003_checkin_difficult_day.sql',
-    '004_mission_weekdays.sql'
+    '004_mission_weekdays.sql',
+    '005_community_post_reports.sql',
+    '006_user_adult_confirmation.sql'
   ]);
 });

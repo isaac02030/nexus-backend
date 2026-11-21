@@ -5,3 +5,5 @@
 \ir migrations/002_user_reminder.sql
 \ir migrations/003_checkin_difficult_day.sql
 \ir migrations/004_mission_weekdays.sql
+\ir migrations/005_community_post_reports.sql
+\ir migrations/006_user_adult_confirmation.sql

@@ -8,9 +8,52 @@ const { Pool } = require('pg');
 const auth     = require('../middleware/auth');
 const { generateNotification } = require('../vertice');
 const { sendNotification }     = require('./notifications');
+const {
+  FREE_DAY_CHECKIN_MESSAGE,
+  currentStreak,
+  missionDayContextFor,
+  normalizeStoredWeekdays,
+  previousMissionDay
+} = require('../lib/mission-days');
 const router   = express.Router();
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
+
+const DAY_MS = 1000 * 60 * 60 * 24;
+
+// Dia de hoje e dias da missão.
+// Sem dias escolhidos (NULL, ou a migração 004 ainda não aplicada): o cálculo
+// de sempre desta rota, todo dia é da missão e nada muda.
+// Com dias escolhidos: o mesmo corte do check-in (routes/checkins.js), com o
+// horário e o fuso da pessoa, para o Grande Irmão nunca cobrar um dia que o
+// check-in recusaria como dia livre.
+// startedOrNow: o envio para todos usava "agora" quando a missão ainda não
+// começou; a mensagem do painel não. Mantido como era.
+async function missionToday(mission, userId, { startedOrNow = false, now = new Date() } = {}) {
+  if (!normalizeStoredWeekdays(mission.mission_weekdays)) {
+    const started = new Date(startedOrNow ? (mission.started_at || now) : mission.started_at);
+    return {
+      dayNumber: Math.floor((now - started) / DAY_MS) + 1,
+      isMissionDay: () => true
+    };
+  }
+  const clockRes = await db.query(
+    `SELECT to_char(reminder_time, 'HH24:MI') AS reminder_time, timezone
+     FROM users
+     WHERE id = $1`,
+    [userId]
+  );
+  const clock = clockRes.rows[0] || {};
+  return missionDayContextFor(mission, clock.reminder_time, clock.timezone, now);
+}
+
+// Dia livre: dentro da missão, mas fora dos dias escolhidos no contrato.
+function isFreeDay(dayNumber, durationDays, isMissionDay) {
+  return Number.isInteger(dayNumber)
+    && dayNumber >= 1
+    && dayNumber <= Number(durationDays)
+    && !isMissionDay(dayNumber);
+}
 
 // ============================================
 // OBTER MENSAGEM DO GRANDE IRMAO PARA O UTILIZADOR
@@ -64,12 +107,18 @@ router.get('/message', auth, async (req, res) => {
     }
 
     // Calcular dia atual
-    const started   = new Date(mission.started_at);
-    const today     = new Date();
-    const dayNumber = Math.floor((today - started) / (1000 * 60 * 60 * 24)) + 1;
+    const { dayNumber, isMissionDay } = await missionToday(mission, userId);
 
-    // Check-ins de hoje
-    const todayStr = today.toISOString().split('T')[0];
+    // Dia livre: o Grande Irmão não cobra check-in nem fala em falta.
+    if (isFreeDay(dayNumber, mission.duration_days, isMissionDay)) {
+      return res.json({
+        message: FREE_DAY_CHECKIN_MESSAGE,
+        day: dayNumber,
+        mode: mission.mode,
+        user_done: false,
+        free_day: true
+      });
+    }
 
     const userCheckinRes = await db.query(
       `SELECT * FROM checkins WHERE mission_id = $1 AND user_id = $2 AND day_number = $3`,
@@ -99,12 +148,11 @@ router.get('/message', auth, async (req, res) => {
       [mission.id, userId]
     );
     const doneDays = new Set(streakDaysRes.rows.map(r => r.day_number));
-    let streak = 0;
-    for (let d = dayNumber; d >= 1; d--) {
-      if (doneDays.has(d)) streak++;
-      else break;
-    }
-    const recoveryNeeded = dayNumber > 1 && !doneDays.has(dayNumber - 1) && !userDoneToday;
+    // Dias livres não contam nem quebram a sequência, como no check-in.
+    const streak = currentStreak(doneDays, dayNumber, isMissionDay);
+    // A recuperação olha o dia da missão anterior (pode ser antes de um dia livre).
+    const previousDay = previousMissionDay(dayNumber, isMissionDay);
+    const recoveryNeeded = previousDay >= 1 && !doneDays.has(previousDay) && !userDoneToday;
 
     // Scores — ler direto da tabela checkins (fonte da verdade)
     const scoresRes = await db.query(
@@ -187,8 +235,13 @@ router.post('/notify-all', async (req, res) => {
       if (mission.partner_id) usersToNotify.push(mission.partner_id);
 
       for (const userId of usersToNotify) {
-        const started   = new Date(mission.started_at || Date.now());
-        const dayNumber = Math.floor((Date.now() - started) / (1000 * 60 * 60 * 24)) + 1;
+        const isWaiting = mission.status === 'waiting';
+        const { dayNumber, isMissionDay } = isWaiting
+          ? await missionToday({ ...mission, mission_weekdays: null }, userId, { startedOrNow: true })
+          : await missionToday(mission, userId, { startedOrNow: true });
+
+        // Dia livre: sem aviso, como no lembrete (routes/notifications.js).
+        if (!isWaiting && isFreeDay(dayNumber, mission.duration_days, isMissionDay)) continue;
 
         const checkinRes = await db.query(
           `SELECT * FROM checkins WHERE mission_id = $1 AND user_id = $2 AND day_number = $3`,

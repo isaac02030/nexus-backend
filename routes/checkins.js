@@ -8,6 +8,7 @@ const { Pool } = require('pg');
 const auth     = require('../middleware/auth');
 const {
   DIFFICULT_DAY_LIMIT,
+  DIFFICULT_MINIMUM_MESSAGE,
   validateDifficultDay
 } = require('../lib/difficult-days');
 const { calculateRecoveryState } = require('../lib/recovery-state');
@@ -150,7 +151,15 @@ router.post('/', auth, async (req, res) => {
     const mission = missionRes.rows[0];
     if (!mission) return reply(404, { error: 'Missão não encontrada.' });
     if (mission.status !== 'active') return reply(400, { error: 'Missão não está ativa.' });
-    const proofError = crisisLevel ? null : getProofValidation(mission.proof_mode, note);
+    // Dia difícil: o mínimo do contrato continua, mas a prova é um toque
+    // («Fiz o mínimo», campo minimum_done: true). A frase fica opcional.
+    // O check-in comum continua a exigir a prova do contrato.
+    if (wantsDifficult && req.body.minimum_done !== true) {
+      return reply(400, { error: DIFFICULT_MINIMUM_MESSAGE });
+    }
+    const proofError = (crisisLevel || wantsDifficult)
+      ? null
+      : getProofValidation(mission.proof_mode, note);
     if (proofError) {
       return reply(400, { error: proofError });
     }

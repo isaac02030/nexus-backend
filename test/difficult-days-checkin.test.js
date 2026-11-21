@@ -6,7 +6,8 @@ const express = require('express');
 const { Pool } = require('pg');
 const {
   DIFFICULT_CONSECUTIVE_MESSAGE,
-  DIFFICULT_LIMIT_MESSAGE
+  DIFFICULT_LIMIT_MESSAGE,
+  DIFFICULT_MINIMUM_MESSAGE
 } = require('../lib/difficult-days');
 const {
   getLegacyMissionDayNumber,
@@ -493,7 +494,7 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
     putUser(user(2));
     putUser(user(8));
     putMission(mission());
-    seedCheckin({ mission_id: 10, user_id: 8, day_number: 1, is_difficult: true });
+    seedCheckin({ mission_id: 10, user_id: 8, day_number: 1, is_difficult: true, minimum_done: true });
 
     const denied = await request('GET', '/api/checkins/10/score', { token: tokenFor(8) });
     const missing = await request('GET', '/api/checkins/999/score', { token: tokenFor(8) });
@@ -526,7 +527,7 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
     });
     const difficult = await request('POST', '/api/checkins', {
       token: tokenFor(9),
-      body: { mission_id: 12, difficult: true }
+      body: { mission_id: 12, difficult: true, minimum_done: true }
     });
 
     assert.equal(plain.status, 404);
@@ -544,12 +545,12 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
     const today = 9;
     putMission(mission({ started_at: startedForLegacyDay(today) }));
     for (const day of [1, 3, 5, 7]) {
-      seedCheckin({ mission_id: 10, user_id: 2, day_number: day, is_difficult: true });
+      seedCheckin({ mission_id: 10, user_id: 2, day_number: day, is_difficult: true, minimum_done: true });
     }
 
     const own = await request('POST', '/api/checkins', {
       token: tokenFor(1),
-      body: { mission_id: 10, difficult: true }
+      body: { mission_id: 10, difficult: true, minimum_done: true }
     });
     assert.equal(own.status, 201);
     assert.equal(own.body.day, today);
@@ -560,7 +561,7 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
 
     const repeated = await request('POST', '/api/checkins', {
       token: tokenFor(1),
-      body: { mission_id: 10, difficult: true }
+      body: { mission_id: 10, difficult: true, minimum_done: true }
     });
     assert.equal(repeated.status, 201);
     assert.equal(repeated.body.already_done, true);
@@ -581,11 +582,11 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
     simulator.reset();
     putUser(user(1));
     putMission(mission({ id: 20, partner_id: null, partner_name: null, mode: 'solo', started_at: startedForLegacyDay(3) }));
-    seedCheckin({ mission_id: 20, user_id: 1, day_number: 1, is_difficult: true });
-    seedCheckin({ mission_id: 20, user_id: 1, day_number: 2, is_difficult: true });
+    seedCheckin({ mission_id: 20, user_id: 1, day_number: 1, is_difficult: true, minimum_done: true });
+    seedCheckin({ mission_id: 20, user_id: 1, day_number: 2, is_difficult: true, minimum_done: true });
     const third = await request('POST', '/api/checkins', {
       token: tokenFor(1),
-      body: { mission_id: 20, difficult: true }
+      body: { mission_id: 20, difficult: true, minimum_done: true }
     });
     assert.equal(third.status, 400);
     assert.equal(third.body.error, DIFFICULT_CONSECUTIVE_MESSAGE);
@@ -594,12 +595,12 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
     simulator.reset();
     putUser(user(1));
     putMission(mission({ id: 21, partner_id: null, partner_name: null, mode: 'solo', started_at: startedForLegacyDay(4) }));
-    seedCheckin({ mission_id: 21, user_id: 1, day_number: 1, is_difficult: true });
-    seedCheckin({ mission_id: 21, user_id: 1, day_number: 2, is_difficult: true });
+    seedCheckin({ mission_id: 21, user_id: 1, day_number: 1, is_difficult: true, minimum_done: true });
+    seedCheckin({ mission_id: 21, user_id: 1, day_number: 2, is_difficult: true, minimum_done: true });
     seedCheckin({ mission_id: 21, user_id: 1, day_number: 3, is_difficult: false });
     const afterGap = await request('POST', '/api/checkins', {
       token: tokenFor(1),
-      body: { mission_id: 21, difficult: true }
+      body: { mission_id: 21, difficult: true, minimum_done: true }
     });
     assert.equal(afterGap.status, 201);
     assert.deepEqual(difficultDays(21, 1), [1, 2, 4]);
@@ -608,11 +609,11 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
     putUser(user(1));
     putMission(mission({ id: 22, partner_id: null, partner_name: null, mode: 'solo', started_at: startedForLegacyDay(9) }));
     for (const day of [1, 3, 5, 7]) {
-      seedCheckin({ mission_id: 22, user_id: 1, day_number: day, is_difficult: true });
+      seedCheckin({ mission_id: 22, user_id: 1, day_number: day, is_difficult: true, minimum_done: true });
     }
     const full = await request('POST', '/api/checkins', {
       token: tokenFor(1),
-      body: { mission_id: 22, difficult: true }
+      body: { mission_id: 22, difficult: true, minimum_done: true }
     });
     assert.equal(full.status, 400);
     assert.equal(full.body.error, DIFFICULT_LIMIT_MESSAGE);
@@ -627,7 +628,7 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
     assert.equal(asText.body.checkin.difficult, false);
   });
 
-  test('dia difícil sem a prova do contrato não é gravado', async () => {
+  test('dia difícil sem confirmar o mínimo não é gravado (400, mensagem calma)', async () => {
     simulator.reset();
     putUser(user(1));
     putMission(mission({
@@ -639,22 +640,121 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
       started_at: startedForLegacyDay(1)
     }));
 
+    for (const body of [
+      { mission_id: 30, difficult: true },
+      { mission_id: 30, difficult: true, minimum_done: false },
+      { mission_id: 30, difficult: true, minimum_done: 'true' },
+      { mission_id: 30, difficult: true, note: 'uma frase longa o bastante' }
+    ]) {
+      const res = await request('POST', '/api/checkins', { token: tokenFor(1), body });
+      assert.equal(res.status, 400);
+      assert.equal(res.body.error, DIFFICULT_MINIMUM_MESSAGE);
+    }
+    assert.equal(simulator.state.checkins.length, 0);
+    assert.equal(simulator.state.connects, 0);
+  });
+
+  test('dia difícil com o mínimo confirmado não exige a frase do contrato', async () => {
+    simulator.reset();
+    putUser(user(1));
+    putMission(mission({
+      id: 30,
+      partner_id: null,
+      partner_name: null,
+      mode: 'solo',
+      proof_mode: 'workout_proof',
+      started_at: startedForLegacyDay(1)
+    }));
+
+    const res = await request('POST', '/api/checkins', {
+      token: tokenFor(1),
+      body: { mission_id: 30, difficult: true, minimum_done: true }
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.checkin.completed, true);
+    assert.equal(res.body.checkin.is_difficult, true);
+    assert.equal(res.body.checkin.note, null);
+    assert.equal(simulator.state.missions.get(30).user_score, 1);
+  });
+
+  test('dia difícil com frase curta opcional é aceito e a frase é gravada', async () => {
+    simulator.reset();
+    putUser(user(1));
+    putMission(mission({
+      id: 32,
+      partner_id: null,
+      partner_name: null,
+      mode: 'solo',
+      proof_mode: 'study_note',
+      started_at: startedForLegacyDay(1)
+    }));
+
+    const res = await request('POST', '/api/checkins', {
+      token: tokenFor(1),
+      body: { mission_id: 32, difficult: true, minimum_done: true, note: 'li 1 pág' }
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.checkin.is_difficult, true);
+    assert.equal(simulator.state.checkins[0].note, 'li 1 pág');
+  });
+
+  test('check-in comum continua a exigir a prova do contrato, mesmo com minimum_done', async () => {
+    simulator.reset();
+    putUser(user(1));
+    putMission(mission({
+      id: 33,
+      partner_id: null,
+      partner_name: null,
+      mode: 'solo',
+      proof_mode: 'workout_proof',
+      started_at: startedForLegacyDay(1)
+    }));
+
     const short = await request('POST', '/api/checkins', {
       token: tokenFor(1),
-      body: { mission_id: 30, difficult: true, note: 'curta' }
+      body: { mission_id: 33, minimum_done: true, note: 'curta' }
     });
     assert.equal(short.status, 400);
     assert.equal(short.body.error, 'Esta missao exige uma prova curta antes do check-in.');
     assert.equal(simulator.state.checkins.length, 0);
-    assert.equal(simulator.state.connects, 0);
 
     const enough = await request('POST', '/api/checkins', {
       token: tokenFor(1),
-      body: { mission_id: 30, difficult: true, note: 'prova curta' }
+      body: { mission_id: 33, note: 'prova curta' }
     });
     assert.equal(enough.status, 201);
-    assert.equal(enough.body.checkin.completed, true);
-    assert.equal(enough.body.checkin.is_difficult, true);
+    assert.equal(enough.body.checkin.is_difficult, false);
+  });
+
+  test('caso negado: sem login o dia difícil não é gravado', async () => {
+    simulator.reset();
+    putUser(user(1));
+    putMission(mission({ id: 34, started_at: startedForLegacyDay(1) }));
+
+    const res = await request('POST', '/api/checkins', {
+      body: { mission_id: 34, difficult: true, minimum_done: true }
+    });
+    assert.equal(res.status, 401);
+    assert.equal(simulator.state.checkins.length, 0);
+    assert.equal(simulator.state.connects, 0);
+  });
+
+  test('caso negado: outra pessoa recebe 404 no dia difícil, com ou sem minimum_done', async () => {
+    simulator.reset();
+    putUser(user(1));
+    putUser(user(2));
+    putUser(user(7));
+    putMission(mission({ id: 35, started_at: startedForLegacyDay(1) }));
+
+    for (const body of [
+      { mission_id: 35, difficult: true, minimum_done: true },
+      { mission_id: 35, difficult: true }
+    ]) {
+      const res = await request('POST', '/api/checkins', { token: tokenFor(7), body });
+      assert.equal(res.status, 404);
+      assert.deepEqual(res.body, { error: 'Missão não encontrada.' });
+    }
+    assert.equal(simulator.state.checkins.length, 0);
   });
 
   test('repetir o dia sem a marca difícil não apaga a marca', async () => {
@@ -670,7 +770,7 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
 
     const marked = await request('POST', '/api/checkins', {
       token: tokenFor(1),
-      body: { mission_id: 31, difficult: true }
+      body: { mission_id: 31, difficult: true, minimum_done: true }
     });
     const plain = await request('POST', '/api/checkins', {
       token: tokenFor(1),
@@ -696,18 +796,18 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
       started_at: startedForLegacyDay(today)
     }));
     for (const day of [1, 3, 5]) {
-      seedCheckin({ mission_id: 40, user_id: 1, day_number: day, is_difficult: true });
+      seedCheckin({ mission_id: 40, user_id: 1, day_number: day, is_difficult: true, minimum_done: true });
     }
     const timeline = armRace();
 
     const [first, second] = await Promise.all([
       request('POST', '/api/checkins', {
         token: tokenFor(1),
-        body: { mission_id: 40, difficult: true }
+        body: { mission_id: 40, difficult: true, minimum_done: true }
       }),
       request('POST', '/api/checkins', {
         token: tokenFor(1),
-        body: { mission_id: 40, difficult: true }
+        body: { mission_id: 40, difficult: true, minimum_done: true }
       })
     ]);
 
@@ -731,18 +831,18 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
       mode: 'solo',
       started_at: startedForLegacyDay(3)
     }));
-    seedCheckin({ mission_id: 41, user_id: 1, day_number: 1, is_difficult: true });
-    seedCheckin({ mission_id: 41, user_id: 1, day_number: 2, is_difficult: true });
+    seedCheckin({ mission_id: 41, user_id: 1, day_number: 1, is_difficult: true, minimum_done: true });
+    seedCheckin({ mission_id: 41, user_id: 1, day_number: 2, is_difficult: true, minimum_done: true });
     const timeline = armRace();
 
     const [first, second] = await Promise.all([
       request('POST', '/api/checkins', {
         token: tokenFor(1),
-        body: { mission_id: 41, difficult: true }
+        body: { mission_id: 41, difficult: true, minimum_done: true }
       }),
       request('POST', '/api/checkins', {
         token: tokenFor(1),
-        body: { mission_id: 41, difficult: true }
+        body: { mission_id: 41, difficult: true, minimum_done: true }
       })
     ]);
 
@@ -765,12 +865,12 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
       mode: 'solo',
       started_at: startedForLegacyDay(6)
     }));
-    seedCheckin({ mission_id: 43, user_id: 1, day_number: 5, is_difficult: true });
-    seedCheckin({ mission_id: 43, user_id: 1, day_number: 7, is_difficult: true });
+    seedCheckin({ mission_id: 43, user_id: 1, day_number: 5, is_difficult: true, minimum_done: true });
+    seedCheckin({ mission_id: 43, user_id: 1, day_number: 7, is_difficult: true, minimum_done: true });
 
     const blocked = await request('POST', '/api/checkins', {
       token: tokenFor(1),
-      body: { mission_id: 43, difficult: true }
+      body: { mission_id: 43, difficult: true, minimum_done: true }
     });
 
     assert.equal(blocked.status, 400);
@@ -805,7 +905,7 @@ describe('dias difíceis no check-in', { concurrency: 1 }, () => {
       }),
       request('POST', '/api/checkins', {
         token: tokenFor(1),
-        body: { mission_id: 42, difficult: true }
+        body: { mission_id: 42, difficult: true, minimum_done: true }
       })
     ]);
 

@@ -186,7 +186,7 @@ describe('filtro de crise na rota de check-in', { concurrency: 1 }, () => {
   });
 
   test('MÉDIO em dia difícil: conta como dia difícil, sem guardar a nota', async () => {
-    const res = await post({ mission_id: 10, difficult: true, note: 'nao vejo saida' });
+    const res = await post({ mission_id: 10, difficult: true, minimum_done: true, note: 'nao vejo saida' });
 
     assert.equal(res.status, 201);
     assert.equal(res.body.crisis, true);
@@ -195,6 +195,26 @@ describe('filtro de crise na rota de check-in', { concurrency: 1 }, () => {
     assert.equal(db.checkins[0].is_difficult, true);
     assert.equal(db.checkins[0].note, null);
     assertNowhere('saida');
+  });
+
+  test('dia difícil sem confirmar o mínimo: 400, nada gravado, mas o sinal de ajuda vai', async () => {
+    const res = await post({ mission_id: 10, difficult: true, note: 'quero morrer' });
+
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /confirme que fez o mínimo/);
+    assert.equal(res.body.crisis, true);
+    assert.equal(db.checkins.length, 0);
+    assertNowhere('morrer');
+    assert.deepEqual(logged, []);
+  });
+
+  test('dia difícil com frase opcional sem crise: a frase é gravada', async () => {
+    const res = await post({ mission_id: 10, difficult: true, minimum_done: true, note: 'dia pesado no trabalho' });
+
+    assert.equal(res.status, 201);
+    assert.equal('crisis' in res.body, false);
+    assert.equal(db.checkins[0].is_difficult, true);
+    assert.equal(db.checkins[0].note, 'dia pesado no trabalho');
   });
 
   test('crise dispensa a prova escrita da missão (sem penalidade)', async () => {

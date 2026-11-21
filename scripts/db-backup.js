@@ -3,10 +3,18 @@ const fs = require('fs');
 const path = require('path');
 const { databaseUrl, databaseName, pgClientSetup } = require('./pg-env');
 const { encryptFile, BackupCryptoError } = require('./backup-crypto');
+const { isLocalDatabaseUrl } = require('../lib/db-config');
 
 async function main() {
   const url = databaseUrl();
   const passphrase = process.env.BACKUP_PASSPHRASE || '';
+  // Banco fora desta máquina (produção, ensaio no provedor): só com cifra.
+  // Sem a frase, recusa antes de copiar qualquer coisa.
+  if (!passphrase && !isLocalDatabaseUrl(url)) {
+    console.error('Este banco não está nesta máquina, e o backup dele precisa sair cifrado.');
+    console.error('Defina BACKUP_PASSPHRASE (16 caracteres ou mais) e rode de novo. Ver docs/backup.md.');
+    process.exit(1);
+  }
   const backupDir = path.join(__dirname, '..', 'backups');
   fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
 

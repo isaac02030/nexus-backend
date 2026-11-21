@@ -22,7 +22,8 @@ BACKUP_PASSPHRASE='uma frase longa só sua' npm run db:backup
 ```
 
 - Com `BACKUP_PASSPHRASE` (16 caracteres ou mais), sai `backups/nexus-<data>.dump.enc`, cifrado. O arquivo aberto é apagado na hora.
-- Sem ela, sai `backups/nexus-<data>.dump`, **aberto**, e o script avisa. Esse não sai deste computador.
+- Banco fora desta máquina (provedor, produção): a frase é obrigatória. Sem ela, o backup recusa e não copia nada.
+- Banco local sem a frase: sai `backups/nexus-<data>.dump`, **aberto**, e o script avisa. Esse não sai deste computador.
 
 A cifra usa só o `crypto` do Node (scrypt + AES-256-GCM), sem programa novo. Arquivo trocado ou frase errada são recusados.
 

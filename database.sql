@@ -4,3 +4,4 @@
 \ir migrations/001_initial_schema.sql
 \ir migrations/002_user_reminder.sql
 \ir migrations/003_checkin_difficult_day.sql
+\ir migrations/004_mission_weekdays.sql

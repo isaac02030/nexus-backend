@@ -7,6 +7,8 @@
 // O numero do dia e o corte do fim da missao usam o mesmo fuso da hora do aviso.
 // Quem nao escolheu mantem as janelas antigas do relogio do servidor.
 // O envio e so push: nao grava mensagem e nao conta no limite de chat.
+// Dia livre (fora dos dias da missao escolhidos no contrato): nenhum
+// lembrete, nem o principal nem os extras, na data local da pessoa.
 // ============================================
 
 const express = require('express');
@@ -22,6 +24,7 @@ const {
   isMissionDayOpen,
   resolveReminderSettings
 } = require('../lib/reminder-schedule');
+const { missionDayChecker, startWeekdayFor } = require('../lib/mission-days');
 
 const router = express.Router();
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -215,11 +218,15 @@ async function sentReminderKinds(userId, missionId, sentOn) {
   return result.rows.map(row => row.kind);
 }
 
-async function deliverDueReminders(participant, mission, now, dayNumber, todayDone, yesterdayDone) {
+async function deliverDueReminders(participant, mission, now, dayNumber, todayDone, yesterdayDone, isMissionDay = () => true) {
   const settings = resolveReminderSettings(participant.reminderTime, participant.timezone);
   if (settings.mode === 'invalid') return;
 
-  const missedYesterday = dayNumber > 1 && !yesterdayDone.has(Number(participant.id));
+  // Ontem livre nao e falta: o aviso de recuperacao ("Ontem falhou") so sai
+  // quando ontem era dia da missao.
+  const missedYesterday = dayNumber > 1
+    && isMissionDay(dayNumber - 1)
+    && !yesterdayDone.has(Number(participant.id));
   let checkedInToday = false;
   let sentOn = null;
 
@@ -261,12 +268,17 @@ function missionDayFor(participant, mission, now) {
   if (settings.mode === 'invalid') return null;
 
   // O fuso da hora do aviso. Sem horario escolhido, fica o calculo antigo.
-  const dayNumber = settings.mode === 'chosen'
-    ? getMissionDayNumber(mission.started_at, now, settings.zone)
+  const zone = settings.mode === 'chosen' ? settings.zone : null;
+  const dayNumber = zone
+    ? getMissionDayNumber(mission.started_at, now, zone)
     : getLegacyMissionDayNumber(mission.started_at, now);
 
   if (!isMissionDayOpen(dayNumber, mission.duration_days)) return null;
-  return dayNumber;
+
+  // Mesmo corte do check-in: o dia da semana vem do Dia 1 nesse fuso.
+  const isMissionDay = missionDayChecker(mission.mission_weekdays, startWeekdayFor(mission.started_at, zone));
+  if (!isMissionDay(dayNumber)) return null;
+  return { dayNumber, isMissionDay };
 }
 
 async function runReminderSweep(now = new Date()) {
@@ -277,6 +289,8 @@ async function runReminderSweep(now = new Date()) {
     await ensureUserReminderColumns();
     await ensureReminderLogTable();
 
+    // mission_weekdays via to_jsonb: NULL (todos os dias) enquanto a
+    // migracao 004 nao estiver aplicada, sem quebrar a consulta.
     const missionsRes = await db.query(`
       SELECT
         m.id,
@@ -284,6 +298,7 @@ async function runReminderSweep(now = new Date()) {
         m.mode,
         m.started_at,
         m.duration_days,
+        to_jsonb(m) -> 'mission_weekdays' AS mission_weekdays,
         m.user_id,
         m.partner_id,
         to_char(u1.reminder_time, 'HH24:MI') AS user_reminder_time,
@@ -312,9 +327,9 @@ async function runReminderSweep(now = new Date()) {
 
       const active = [];
       for (const participant of participants) {
-        const dayNumber = missionDayFor(participant, mission, now);
-        if (dayNumber == null) continue;
-        active.push({ participant, dayNumber });
+        const day = missionDayFor(participant, mission, now);
+        if (day == null) continue;
+        active.push({ participant, dayNumber: day.dayNumber, isMissionDay: day.isMissionDay });
       }
       if (active.length === 0) continue;
 
@@ -349,7 +364,8 @@ async function runReminderSweep(now = new Date()) {
             now,
             item.dayNumber,
             todayDone,
-            yesterdayDone
+            yesterdayDone,
+            item.isMissionDay
           );
         } catch (err) {
           console.error('Erro ao avaliar lembrete:', err.message);

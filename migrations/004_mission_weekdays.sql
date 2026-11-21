@@ -1,5 +1,5 @@
 -- Dias da missão escolhidos no contrato: dias fixos da semana, de 3 a 7.
--- 1 = segunda ... 7 = domingo (ISO). NULL = todos os dias, como antes.
+-- 1 = segunda ... 7 = domingo (ISO), sem repetir. NULL = todos os dias, como antes.
 -- Os outros dias são dias livres: sem check-in, sem lembrete, sem falta.
 -- Só acrescenta: missões que já existem ficam NULL e não mudam.
 -- Safe to run more than once: no DROP, no UPDATE, no DELETE.
@@ -27,6 +27,16 @@ BEGIN
           cardinality(mission_weekdays) BETWEEN 3 AND 7
           AND array_position(mission_weekdays, NULL) IS NULL
           AND mission_weekdays <@ ARRAY[1, 2, 3, 4, 5, 6, 7]::SMALLINT[]
+          -- Sem dias repetidos: cada dia aparece no máximo 1 vez. O Postgres
+          -- não aceita subconsulta (COUNT DISTINCT) num CHECK, então
+          -- conferimos um por um com array_positions.
+          AND cardinality(array_positions(mission_weekdays, 1::SMALLINT)) <= 1
+          AND cardinality(array_positions(mission_weekdays, 2::SMALLINT)) <= 1
+          AND cardinality(array_positions(mission_weekdays, 3::SMALLINT)) <= 1
+          AND cardinality(array_positions(mission_weekdays, 4::SMALLINT)) <= 1
+          AND cardinality(array_positions(mission_weekdays, 5::SMALLINT)) <= 1
+          AND cardinality(array_positions(mission_weekdays, 6::SMALLINT)) <= 1
+          AND cardinality(array_positions(mission_weekdays, 7::SMALLINT)) <= 1
         )
       );
   END IF;

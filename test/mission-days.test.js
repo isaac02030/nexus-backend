@@ -194,6 +194,10 @@ test('a migração 004 só acrescenta a coluna dos dias da missão', () => {
   assert.match(code, /ADD COLUMN IF NOT EXISTS mission_weekdays SMALLINT\[\]/i);
   assert.doesNotMatch(code, /mission_weekdays SMALLINT\[\][^;]*NOT NULL/i);
   assert.match(code, /BETWEEN 3 AND 7/);
+  // Dias repetidos ({1,1,1}) também são barrados no banco, um dia por vez.
+  for (let day = 1; day <= 7; day += 1) {
+    assert.match(code, new RegExp(`cardinality\\(array_positions\\(mission_weekdays, ${day}::SMALLINT\\)\\) <= 1`));
+  }
   assert.match(code, /IF NOT EXISTS/);
   assert.doesNotMatch(code, /\bDROP\b/i);
   assert.doesNotMatch(code, /\bUPDATE\b/i);

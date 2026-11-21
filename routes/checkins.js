@@ -8,6 +8,7 @@ const { Pool } = require('pg');
 const auth     = require('../middleware/auth');
 const {
   DIFFICULT_DAY_LIMIT,
+  DIFFICULT_MINIMUM_MESSAGE,
   validateDifficultDay
 } = require('../lib/difficult-days');
 const { calculateRecoveryState } = require('../lib/recovery-state');
@@ -150,7 +151,15 @@ router.post('/', auth, async (req, res) => {
     const mission = missionRes.rows[0];
     if (!mission) return reply(404, { error: 'Missão não encontrada.' });
     if (mission.status !== 'active') return reply(400, { error: 'Missão não está ativa.' });
-    const proofError = crisisLevel ? null : getProofValidation(mission.proof_mode, note);
+    // Dia difícil: o mínimo do contrato continua, mas a prova é um toque
+    // («Fiz o mínimo», campo minimum_done: true). A frase fica opcional.
+    // O check-in comum continua a exigir a prova do contrato.
+    if (wantsDifficult && req.body.minimum_done !== true) {
+      return reply(400, { error: DIFFICULT_MINIMUM_MESSAGE });
+    }
+    const proofError = (crisisLevel || wantsDifficult)
+      ? null
+      : getProofValidation(mission.proof_mode, note);
     if (proofError) {
       return reply(400, { error: proofError });
     }
@@ -158,7 +167,9 @@ router.post('/', auth, async (req, res) => {
     // Comum e difícil usam a mesma transação e a mesma trava da missão.
     // O dia é calculado depois da trava, para dois pedidos não somarem
     // o ponto duas vezes nem passarem de 4 ou de 2 seguidos.
-    const recorded = await recordCheckin({ mission, userId, note, wantsDifficult });
+    const recorded = await recordCheckin({
+      mission, userId, note, wantsDifficult, clearNote: Boolean(crisisLevel)
+    });
     return reply(recorded.status, recorded.body);
 
   } catch (err) {
@@ -309,7 +320,11 @@ function checkinMessage(dayNumber, alreadyDone) {
 
 // Trava a missão, calcula o dia e grava o check-in antes de soltar a trava.
 // Vale para o dia comum e para o difícil. A cota difícil é por pessoa.
-async function recordCheckin({ mission, userId, note, wantsDifficult }) {
+// Nota ao repetir o dia: sem frase nova, a nota que já existia fica (o dia
+// difícil sem frase não apaga nada). Se o filtro de crise disparou
+// (clearNote), a nota do dia é apagada, como no PR 12: nada de crise é
+// gravado e nenhuma nota antiga volta a aparecer ao lado de um pedido de ajuda.
+async function recordCheckin({ mission, userId, note, wantsDifficult, clearNote }) {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -376,10 +391,10 @@ async function recordCheckin({ mission, userId, note, wantsDifficult }) {
        VALUES ($1, $2, $3, true, $4, $5)
        ON CONFLICT (mission_id, user_id, day_number)
        DO UPDATE SET completed = true,
-                     note = $4,
+                     note = CASE WHEN $6 THEN NULL ELSE COALESCE($4, checkins.note) END,
                      is_difficult = checkins.is_difficult OR EXCLUDED.is_difficult
        RETURNING *`,
-      [mission.id, userId, dayNumber, note || null, wantsDifficult]
+      [mission.id, userId, dayNumber, note || null, wantsDifficult, clearNote === true]
     );
 
     if (!alreadyDone) {

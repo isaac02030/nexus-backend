@@ -28,3 +28,6 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+# Backups cifrados (também ficam em backups/).
+*.enc

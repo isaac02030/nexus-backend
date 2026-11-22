@@ -4,15 +4,12 @@
 // ============================================
 
 const express = require('express');
-const { Pool } = require('pg');
+const { db } = require('../lib/db');
 const auth = require('../middleware/auth');
 const { validateMissionWeekdays } = require('../lib/mission-days');
 const router = express.Router();
 
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
-let missionContractReady = false;
 let missionParticipantHealingReady = false;
-let missionMatchSchemaReady = false;
 
 // Auto-matching stays off unless the environment explicitly sets MATCHING_ENABLED=true.
 function isMatchingEnabled() {
@@ -24,47 +21,6 @@ function missionParticipantWhere(alias = 'm', userParam = '$1') {
     ${alias}.user_id = ${userParam}
     OR ${alias}.partner_id = ${userParam}
   )`;
-}
-
-async function ensureMissionContractColumns() {
-  if (missionContractReady) return;
-
-  await db.query(`
-    ALTER TABLE missions
-      ADD COLUMN IF NOT EXISTS daily_minimum VARCHAR(120),
-      ADD COLUMN IF NOT EXISTS commitment_window VARCHAR(120),
-      ADD COLUMN IF NOT EXISTS why_it_matters TEXT,
-      ADD COLUMN IF NOT EXISTS fallback_plan TEXT,
-      ADD COLUMN IF NOT EXISTS proof_mode VARCHAR(40),
-      ADD COLUMN IF NOT EXISTS study_focus VARCHAR(160),
-      ADD COLUMN IF NOT EXISTS study_current_stage VARCHAR(160),
-      ADD COLUMN IF NOT EXISTS study_target_outcome TEXT,
-      ADD COLUMN IF NOT EXISTS match_preference VARCHAR(20),
-      ADD COLUMN IF NOT EXISTS partner_started_at TIMESTAMP,
-      ADD COLUMN IF NOT EXISTS pair_started_at TIMESTAMP
-  `);
-
-  missionContractReady = true;
-}
-
-async function ensureMissionMatchSchema() {
-  if (missionMatchSchemaReady) return;
-
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS mission_matches (
-      id SERIAL PRIMARY KEY,
-      mission_a_id INTEGER NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
-      mission_b_id INTEGER NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
-      mode VARCHAR(20) NOT NULL CHECK (mode IN ('parceiro', 'rival')),
-      status VARCHAR(20) NOT NULL DEFAULT 'active',
-      started_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      ended_at TIMESTAMP,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      CHECK (mission_a_id <> mission_b_id)
-    )
-  `);
-
-  missionMatchSchemaReady = true;
 }
 
 async function healPairedMissionParticipants() {
@@ -129,7 +85,6 @@ async function healWaitingSoloMissions() {
 }
 
 async function endLinkedMissionMatch(missionId, userId, { abandon = false } = {}) {
-  await ensureMissionMatchSchema();
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -208,8 +163,6 @@ router.post('/', auth, async (req, res) => {
   }
 
   try {
-    await ensureMissionContractColumns();
-    await ensureMissionMatchSchema();
     await healPairedMissionParticipants();
     await healWaitingSoloMissions();
 
@@ -290,7 +243,6 @@ router.post('/', auth, async (req, res) => {
 
 router.get('/:id', auth, async (req, res) => {
   try {
-    await ensureMissionContractColumns();
     await healPairedMissionParticipants();
     await healWaitingSoloMissions();
 
@@ -318,8 +270,6 @@ router.get('/:id', auth, async (req, res) => {
 
 router.get('/', auth, async (req, res) => {
   try {
-    await ensureMissionContractColumns();
-    await ensureMissionMatchSchema();
     await healPairedMissionParticipants();
     await healWaitingSoloMissions();
 
@@ -386,8 +336,6 @@ router.get('/', auth, async (req, res) => {
 
 router.post('/:id/match', auth, async (req, res) => {
   try {
-    await ensureMissionContractColumns();
-    await ensureMissionMatchSchema();
     const missionRes = await db.query(
       `SELECT * FROM missions
        WHERE id = $1 AND user_id = $2 AND status = 'active'

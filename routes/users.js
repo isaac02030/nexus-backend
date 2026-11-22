@@ -6,24 +6,12 @@
 const express  = require('express');
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
-const { Pool } = require('pg');
+const { db } = require('../lib/db');
 const { validateReminderPayload } = require('../lib/reminder-schedule');
 const { checkAdult } = require('../lib/adult-age');
 const router   = express.Router();
 
-// Ligação à base de dados
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
-
 const REGISTER_UNAVAILABLE_MESSAGE = 'O cadastro não está disponível agora. Tente de novo mais tarde.';
-
-async function ensureUserProfileColumns() {
-  await db.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS avatar_url TEXT,
-    ADD COLUMN IF NOT EXISTS reminder_time TIME,
-    ADD COLUMN IF NOT EXISTS timezone TEXT
-  `);
-}
 
 // ============================================
 // REGISTO
@@ -54,8 +42,6 @@ router.post('/register', async (req, res) => {
   }
 
   try {
-    await ensureUserProfileColumns();
-
     // Encriptar a password (nunca guardamos em texto simples)
     const hash = await bcrypt.hash(password, 10);
 
@@ -106,8 +92,6 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    await ensureUserProfileColumns();
-
     // Procurar o utilizador pelo email
     const result = await db.query(
       'SELECT * FROM users WHERE email = $1',
@@ -151,8 +135,6 @@ const auth = require('../middleware/auth');
 
 router.get('/me', auth, async (req, res) => {
   try {
-    await ensureUserProfileColumns();
-
     const result = await db.query(
       // adult_confirmed: false para contas antigas (de antes da idade no
       // cadastro) e também antes da migração 006 (to_jsonb não quebra).
@@ -176,8 +158,6 @@ router.get('/me', auth, async (req, res) => {
 
 router.get('/me/reminder', auth, async (req, res) => {
   try {
-    await ensureUserProfileColumns();
-
     const result = await db.query(
       `SELECT to_char(reminder_time, 'HH24:MI') AS reminder_time, timezone
        FROM users
@@ -206,8 +186,6 @@ router.put('/me/reminder', auth, async (req, res) => {
   }
 
   try {
-    await ensureUserProfileColumns();
-
     const result = await db.query(
       `UPDATE users
        SET reminder_time = $1::time, timezone = $2, updated_at = NOW()
@@ -240,7 +218,6 @@ router.put('/profile', auth, async (req, res) => {
 
   try {
     // Verificar se username já está em uso por outro utilizador
-    await ensureUserProfileColumns();
     const existing = await db.query(
       'SELECT id FROM users WHERE username = $1 AND id != $2',
       [username.trim(), userId]

@@ -87,6 +87,9 @@ function startServer(port) {
       NODE_ENV: 'test',
       PORT: String(port),
       DATABASE_URL: dbUrl,
+      // Banco local descartável: TLS desligado de forma explícita (só vale
+      // com o banco nesta máquina; ver lib/db-config.js).
+      DATABASE_SSL: 'disable',
       JWT_SECRET,
       TZ: 'UTC',
       PATH: process.env.PATH || '',

@@ -3,8 +3,9 @@
 // Rota para disparar notificações contextuais
 // ============================================
 
+const crypto   = require('crypto');
 const express  = require('express');
-const { Pool } = require('pg');
+const { db } = require('../lib/db');
 const auth     = require('../middleware/auth');
 const { generateNotification } = require('../vertice');
 const { sendNotification }     = require('./notifications');
@@ -17,9 +18,16 @@ const {
 } = require('../lib/mission-days');
 const router   = express.Router();
 
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
-
 const DAY_MS = 1000 * 60 * 60 * 24;
+
+// Compara a chave recebida com a esperada em tempo constante (o resumo
+// sha256 deixa os dois do mesmo tamanho). Sem cabeçalho: não confere.
+function sameSecret(received, expected) {
+  if (typeof received !== 'string' || received === '') return false;
+  const a = crypto.createHash('sha256').update(received).digest();
+  const b = crypto.createHash('sha256').update(String(expected)).digest();
+  return crypto.timingSafeEqual(a, b);
+}
 
 // Dia de hoje e dias da missão.
 // Sem dias escolhidos (NULL, ou a migração 004 ainda não aplicada): o cálculo
@@ -211,10 +219,13 @@ router.get('/message', auth, async (req, res) => {
 // (Chamado por um cron job ou manualmente)
 // ============================================
 router.post('/notify-all', async (req, res) => {
-  // Chave secreta para proteger este endpoint (VERTICE_SECRET, separado do JWT)
-  const secret = req.headers['x-vertice-secret'];
-  const expected = process.env.VERTICE_SECRET || process.env.JWT_SECRET;
-  if (secret !== expected) {
+  // Chave própria deste endpoint (VERTICE_SECRET). Não usa o JWT_SECRET
+  // como reserva: se a chave falta ou é igual à do login, fica desligado.
+  const expected = process.env.VERTICE_SECRET;
+  if (!expected || expected === process.env.JWT_SECRET) {
+    return res.status(503).json({ error: 'O envio de avisos está desligado: falta configurar a chave própria dele (VERTICE_SECRET).' });
+  }
+  if (!sameSecret(req.headers['x-vertice-secret'], expected)) {
     return res.status(401).json({ error: 'Não autorizado.' });
   }
 

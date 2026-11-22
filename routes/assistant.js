@@ -1,10 +1,9 @@
 const express = require('express');
 const https = require('https');
-const { Pool } = require('pg');
+const { db } = require('../lib/db');
 const auth = require('../middleware/auth');
 
 const router = express.Router();
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
 const DEFAULT_ASSISTANT_MODEL = 'gpt-4o-mini';
 
 function resolveAssistantModel() {

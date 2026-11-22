@@ -7,7 +7,20 @@ const express = require('express');
 const cors    = require('cors');
 const { buildAllowedOrigins } = require('./lib/allowed-origins');
 const { errorHandler } = require('./lib/error-handler');
+const { checkStartupConfig } = require('./lib/startup-config');
 require('dotenv').config();
+
+// Antes de carregar as rotas (que abrem o Pool do banco): em produção, sem
+// segredos fortes e distintos ou sem TLS no banco, o servidor não sobe.
+if (require.main === module) {
+  const { errors, warnings } = checkStartupConfig(process.env);
+  for (const warning of warnings) console.warn(`Aviso: ${warning}`);
+  if (errors.length) {
+    console.error('O servidor não vai subir. Corrija nas variáveis de ambiente:');
+    for (const error of errors) console.error(`- ${error}`);
+    process.exit(1);
+  }
+}
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -105,9 +118,17 @@ app.use(errorHandler);
 // INICIAR O SERVIDOR
 // ============================================
 if (require.main === module) {
-  app.listen(PORT, () => {
+  const { closeDb } = require('./lib/db');
+  const { stopReminderScheduler } = require('./routes/notifications');
+  const { createShutdown } = require('./lib/shutdown');
+
+  const server = app.listen(PORT, () => {
     console.log(`🔥 Nexus API a correr em http://localhost:${PORT}`);
   });
+
+  const shutdown = createShutdown({ server, closeDb, stopTimers: stopReminderScheduler });
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 module.exports = app;

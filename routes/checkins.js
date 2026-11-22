@@ -4,7 +4,7 @@
 // ============================================
 
 const express  = require('express');
-const { Pool } = require('pg');
+const { db } = require('../lib/db');
 const auth     = require('../middleware/auth');
 const {
   DIFFICULT_DAY_LIMIT,
@@ -29,8 +29,6 @@ const {
   resolveReminderSettings
 } = require('../lib/reminder-schedule');
 const router   = express.Router();
-
-const db = new Pool({ connectionString: process.env.DATABASE_URL });
 
 function missionParticipantWhere(alias = 'm', userParam = '$2') {
   return `(

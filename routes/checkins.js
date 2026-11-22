@@ -244,14 +244,18 @@ router.get('/:missionId', auth, async (req, res) => {
       [missionIds]
     );
 
+    // A nota é só do autor (decisão de 22/11): o parceiro vê o dia, se fez
+    // e se foi dia difícil, nunca o campo note.
+    const requesterId = Number(req.user.userId);
     const byUser = result.rows.reduce((acc, row) => {
       if (!acc[row.user_id]) acc[row.user_id] = { username: row.username, checkins: [] };
-      acc[row.user_id].checkins.push({
+      const item = {
         day: row.day_number,
         completed: row.completed,
-        note: row.note,
         difficult: isDifficultDay(row)
-      });
+      };
+      if (Number(row.user_id) === requesterId) item.note = row.note;
+      acc[row.user_id].checkins.push(item);
       return acc;
     }, {});
 

@@ -16,14 +16,9 @@ function resolveAssistantModel() {
     : DEFAULT_ASSISTANT_MODEL;
 }
 
-function buildMissionContext(mission, checkins, question) {
-  const recentNotes = checkins
-    .filter(item => item.completed && item.note && item.note.trim())
-    .sort((a, b) => b.day_number - a.day_number)
-    .slice(0, 5)
-    .map(item => `Dia ${item.day_number}: ${String(item.note).slice(0, 280)}`)
-    .join('\n');
-
+// As notas do check-in não vão para a IA (decisão de 22/11). O prompt não
+// recebe os check-ins: assim nenhuma nota chega à OpenAI por engano.
+function buildMissionContext(mission, question) {
   return `
 Tu es o Assistente da Missao do Nexus.
 Responde sempre em portugues do Brasil.
@@ -46,9 +41,6 @@ Missao atual:
 - estudo foco: ${mission.study_focus || 'nao se aplica'}
 - estudo etapa atual: ${mission.study_current_stage || 'nao se aplica'}
 - estudo objetivo de 30 dias: ${mission.study_target_outcome || 'nao se aplica'}
-
-Notas/check-ins recentes:
-${recentNotes || 'Sem notas recentes.'}
 
 Pergunta do usuario:
 ${question}
@@ -299,7 +291,7 @@ router.post('/mission', auth, async (req, res) => {
       [missionId, userId]
     );
 
-    const prompt = buildMissionContext(mission, checkinsRes.rows, question);
+    const prompt = buildMissionContext(mission, question);
 
     if (!process.env.OPENAI_API_KEY) {
       return res.json({
@@ -338,3 +330,4 @@ router.post('/mission', auth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.buildMissionContext = buildMissionContext;

@@ -6,6 +6,7 @@ const { describe, test, mock, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const webpush = require('web-push');
 const { Pool } = require('pg');
+const { withAuthDb } = require('./helpers/auth-db');
 
 const pushes = [];
 const inserts = [];
@@ -87,7 +88,7 @@ function bodiesFor(userId) {
 
 describe('dia da missao no fuso da pessoa', { concurrency: 1 }, () => {
   before(() => {
-    mock.method(Pool.prototype, 'query', handleQuery);
+    mock.method(Pool.prototype, 'query', withAuthDb(handleQuery));
     mock.method(webpush, 'sendNotification', async (_subscription, payload) => {
       pushes.push({ userId: lastUserId, ...JSON.parse(payload) });
     });

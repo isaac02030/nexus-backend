@@ -8,6 +8,7 @@ const { EventEmitter } = require('node:events');
 const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
+const { withAuthDb } = require('./helpers/auth-db');
 
 process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
@@ -128,7 +129,7 @@ function checkinsOf(body, userId) {
 
 describe('nota do check-in é só do autor', { concurrency: 1 }, () => {
   before(async () => {
-    mock.method(Pool.prototype, 'query', (sql, params) => handleQuery(sql, params));
+    mock.method(Pool.prototype, 'query', withAuthDb((sql, params) => handleQuery(sql, params)));
     await new Promise((resolve) => {
       server = http.createServer(app).listen(0, '127.0.0.1', resolve);
     });
@@ -194,7 +195,7 @@ describe('a IA não recebe as notas do check-in', { concurrency: 1 }, () => {
 
   before(async () => {
     process.env.OPENAI_API_KEY = 'chave-falsa-de-teste';
-    mock.method(Pool.prototype, 'query', (sql, params) => handleQuery(sql, params));
+    mock.method(Pool.prototype, 'query', withAuthDb((sql, params) => handleQuery(sql, params)));
     // Intercepta a ida à OpenAI: guarda o corpo e responde como a API, sem rede.
     mock.method(https, 'request', (options, onResponse) => {
       const req = new EventEmitter();

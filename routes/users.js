@@ -9,6 +9,9 @@ const jwt      = require('jsonwebtoken');
 const { db } = require('../lib/db');
 const { validateReminderPayload } = require('../lib/reminder-schedule');
 const { checkAdult } = require('../lib/adult-age');
+const { deleteAccountData } = require('../lib/account-deletion');
+const { isAdmin } = require('../lib/admin');
+const { lockedForSeconds, recordWrong, clearAttempts } = require('../lib/password-attempts');
 const router   = express.Router();
 
 const REGISTER_UNAVAILABLE_MESSAGE = 'O cadastro não está disponível agora. Tente de novo mais tarde.';
@@ -252,6 +255,87 @@ router.put('/profile', auth, async (req, res) => {
 
   } catch (err) {
     res.status(500).json({ error: 'Erro ao atualizar perfil.' });
+  }
+});
+
+// ============================================
+// EXCLUIR A CONTA
+// DELETE /api/users/me
+// Body: { password }
+//
+// Pede a senha atual (spec da Clara: «Digite sua senha para confirmar»).
+// Senha errada: 403 com code "wrong_password" e nada apagado. Apaga tudo
+// numa transação (lib/account-deletion.js). Depois, o middleware de login
+// recusa o token (a conta não existe mais). Sem prazo de arrependimento:
+// apaga na hora (decisão de 22/11). Nada do pedido vai para log.
+// A conta de admin não se exclui por aqui (403). Senhas erradas demais:
+// 429 por 15 minutos (lib/password-attempts.js).
+// ============================================
+const ACCOUNT_DELETE_PASSWORD_MESSAGE = 'Digite sua senha para confirmar.';
+const ACCOUNT_DELETE_WRONG_PASSWORD_MESSAGE = 'Senha incorreta. Sua conta não foi excluída.';
+const ACCOUNT_DELETE_FAILED_MESSAGE = 'Não foi possível excluir agora. Tente de novo.';
+const ACCOUNT_DELETE_ADMIN_MESSAGE = 'A conta de administração não pode ser excluída por aqui.';
+const ACCOUNT_DELETE_TOO_MANY_MESSAGE = 'Muitas tentativas com a senha errada. Sua conta não foi excluída. Tente de novo em 15 minutos.';
+
+function tooMany(res, seconds) {
+  res.set('Retry-After', String(seconds));
+  return res.status(429).json({ error: ACCOUNT_DELETE_TOO_MANY_MESSAGE, code: 'too_many_attempts' });
+}
+
+router.delete('/me', auth, async (req, res) => {
+  const userId = Number(req.user.userId);
+  const password = req.body?.password;
+
+  if (isAdmin(req.user)) {
+    return res.status(403).json({ error: ACCOUNT_DELETE_ADMIN_MESSAGE, code: 'admin_account' });
+  }
+
+  const lockedBefore = lockedForSeconds(userId);
+  if (lockedBefore) return tooMany(res, lockedBefore);
+
+  if (typeof password !== 'string' || password.length === 0 || password.length > 200) {
+    return res.status(400).json({ error: ACCOUNT_DELETE_PASSWORD_MESSAGE, code: 'password_required' });
+  }
+
+  let client;
+  try {
+    client = await db.connect();
+    await client.query('BEGIN');
+    // Trava a linha da pessoa: um check-in, post ou mensagem ao mesmo tempo
+    // espera e depois falha pela chave estrangeira, sem deixar resto.
+    const userRes = await client.query(
+      'SELECT id, password FROM users WHERE id = $1 FOR UPDATE',
+      [userId]
+    );
+    const user = userRes.rows[0];
+    // De novo com a linha travada: pedidos ao mesmo tempo esperam aqui um
+    // pelo outro e veem a contagem do anterior.
+    const lockedNow = lockedForSeconds(userId);
+    if (lockedNow) {
+      await client.query('ROLLBACK');
+      return tooMany(res, lockedNow);
+    }
+    const valid = user ? await bcrypt.compare(password, user.password) : false;
+    if (!valid) {
+      const lockedAfter = recordWrong(userId);
+      await client.query('ROLLBACK');
+      if (lockedAfter) return tooMany(res, lockedAfter);
+      return res.status(403).json({ error: ACCOUNT_DELETE_WRONG_PASSWORD_MESSAGE, code: 'wrong_password' });
+    }
+
+    await deleteAccountData(client, userId);
+    await client.query('COMMIT');
+    clearAttempts(userId);
+    return res.json({ deleted: true });
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
+    }
+    // Só o tipo do erro: nada do pedido nem dos dados.
+    console.error('Account deletion error:', (err && (err.code || err.name)) || 'unknown');
+    return res.status(500).json({ error: ACCOUNT_DELETE_FAILED_MESSAGE });
+  } finally {
+    if (client) client.release();
   }
 });
 

@@ -8,6 +8,7 @@ const { EventEmitter } = require('node:events');
 const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
+const { withAuthDb } = require('./helpers/auth-db');
 
 process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
@@ -89,7 +90,7 @@ function loggedText() {
 describe('assistente: filtro de crise e erro sem eco', { concurrency: 1 }, () => {
   before(async () => {
     process.env.OPENAI_API_KEY = 'chave-falsa-de-teste';
-    mock.method(Pool.prototype, 'query', (sql, params) => handleQuery(sql, params));
+    mock.method(Pool.prototype, 'query', withAuthDb((sql, params) => handleQuery(sql, params)));
     mock.method(console, 'error', (...args) => { logged.push(args); });
     mock.method(console, 'log', (...args) => { logged.push(args); });
     // Intercepta a OpenAI: guarda o corpo e responde conforme providerReply.
@@ -237,6 +238,27 @@ describe('assistente: filtro de crise e erro sem eco', { concurrency: 1 }, () =>
     assert.equal(res.raw.includes(PROVIDER_SECRET_TEXT), false);
     assert.equal(loggedText().includes(PROVIDER_SECRET_TEXT), false);
     assert.match(loggedText(), /openai_network_error/);
+  });
+
+  test('health do admin com erro da OpenAI: código fixo, sem a mensagem do provedor', async () => {
+    providerReply = { status: 400, raw: JSON.stringify({ error: { message: PROVIDER_SECRET_TEXT } }) };
+    const response = await fetch(`${baseUrl}/api/assistant/health?live=1`, {
+      headers: { Authorization: `Bearer ${tokenFor(1)}` }
+    });
+    const raw = await response.text();
+    assert.equal(response.status, 500);
+    assert.equal(JSON.parse(raw).error, 'openai_unavailable');
+    assert.equal(raw.includes(PROVIDER_SECRET_TEXT), false);
+    assert.equal(loggedText().includes(PROVIDER_SECRET_TEXT), false);
+    assert.match(loggedText(), /openai_http_error/);
+  });
+
+  test('health: quem não é admin recebe 403 e nada vai à OpenAI', async () => {
+    const response = await fetch(`${baseUrl}/api/assistant/health?live=1`, {
+      headers: { Authorization: `Bearer ${tokenFor(2)}` }
+    });
+    assert.equal(response.status, 403);
+    assert.equal(sent.length, 0);
   });
 
   test('erro do banco: 500 sem details e sem a mensagem do erro no log', async () => {

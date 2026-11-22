@@ -10,6 +10,7 @@ const http = require('node:http');
 const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
+const { withAuthDb } = require('./helpers/auth-db');
 const { startWeekdayFor, weekdayForDay } = require('../lib/mission-days');
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -90,7 +91,7 @@ const admin = jwt.sign({ userId: 1 }, process.env.JWT_SECRET);
 
 describe('insights e dias livres', { concurrency: 1 }, () => {
   before(async () => {
-    mock.method(Pool.prototype, 'query', async sql => handle(sql));
+    mock.method(Pool.prototype, 'query', withAuthDb(async sql => handle(sql)));
     const app = express();
     app.use('/api/insights', require('../routes/insights'));
     await new Promise(resolve => {

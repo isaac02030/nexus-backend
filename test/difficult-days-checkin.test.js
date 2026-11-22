@@ -4,6 +4,7 @@ const http = require('node:http');
 const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
+const { withAuthDb } = require('./helpers/auth-db');
 const {
   DIFFICULT_CONSECUTIVE_MESSAGE,
   DIFFICULT_LIMIT_MESSAGE,
@@ -476,7 +477,7 @@ function armLockRace() {
 
 describe('dias difíceis no check-in', { concurrency: 1 }, () => {
   before(async () => {
-    mock.method(Pool.prototype, 'query', (sql, params) => simulator.query(sql, params));
+    mock.method(Pool.prototype, 'query', withAuthDb((sql, params) => simulator.query(sql, params)));
     mock.method(Pool.prototype, 'connect', () => simulator.connect());
     await new Promise(resolve => {
       server = http.createServer(app).listen(0, '127.0.0.1', resolve);

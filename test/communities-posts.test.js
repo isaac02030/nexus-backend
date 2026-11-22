@@ -4,6 +4,7 @@ const http = require('node:http');
 const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
+const { withAuthDb } = require('./helpers/auth-db');
 
 process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
@@ -152,7 +153,7 @@ async function request(method, path, { token, body } = {}) {
 
 describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
   before(async () => {
-    mock.method(Pool.prototype, 'query', async (sql, params) => handle(sql, params));
+    mock.method(Pool.prototype, 'query', withAuthDb(async (sql, params) => handle(sql, params)));
     mock.method(Pool.prototype, 'connect', async () => ({
       query: async (sql, params) => handle(sql, params),
       release() {}

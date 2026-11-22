@@ -196,7 +196,12 @@ const HIGH_CASES_V2 = [
   'nao quero me matar',
   'nunca pensei em me matar',
   'nao quero morrer cedo',
-  'o treino me fez querer me matar'
+  'o treino me fez querer me matar',
+  // v2.1 (2, 3, 5)
+  'ele quer muito se matar',
+  'to pensando em acabar com a vida',
+  'estava com vontade de morrer',
+  'ela ia me matar se eu chegasse tarde'
 ];
 
 const MEDIUM_CASES_V2 = [
@@ -207,16 +212,10 @@ const MEDIUM_CASES_V2 = [
   'queria nao ter nascido',
   'queria nao acordar amanha',
   'quero acabar com tudo',
-  'e se eu morresse'
-];
-
-// Previstos pela lista (4.5) que a própria lista não cobre. A lista não foi
-// mudada: o caso fica visível aqui até a autora da lista decidir.
-const MEDIUM_CASES_V2_NOT_COVERED = [
-  {
-    note: 'desisti da vida',
-    why: 'o alvo da 2.3.3 é "desistir da vida" (infinitivo) depois de um gatilho; "desisti" sem gatilho não está em nenhuma tabela'
-  }
+  'e se eu morresse',
+  // v2.1 (1): antes ficava como caso previsto e não coberto.
+  'desisti da vida',
+  'desisti de viver'
 ];
 
 const SILENT_CASES_V2 = [
@@ -243,7 +242,11 @@ const SILENT_CASES_V2 = [
   'queria matar a saudade',
   'matei a aula',
   'tenho medo de morrer de infarto',
-  'o personagem morre no final do filme'
+  'o personagem morre no final do filme',
+  // v2.1 (4)
+  'o celular vai morrer',
+  'a bateria do celular vai morrer hoje',
+  'desisti do treino'
 ];
 
 describe('filtro de crise v2: casos da secção 4 (4.4 a 4.6)', () => {
@@ -252,11 +255,6 @@ describe('filtro de crise v2: casos da secção 4 (4.4 a 4.6)', () => {
   }
   for (const note of MEDIUM_CASES_V2) {
     test(`MÉDIO: ${note}`, () => assert.equal(classifyNote(note), 'medio'));
-  }
-  for (const { note, why } of MEDIUM_CASES_V2_NOT_COVERED) {
-    test(`MÉDIO previsto, não coberto pela lista: ${note}`, { todo: why }, () => {
-      assert.equal(classifyNote(note), 'medio');
-    });
   }
   for (const note of SILENT_CASES_V2) {
     test(`não dispara: ${note}`, () => assert.equal(classifyNote(note), null));
@@ -444,6 +442,7 @@ describe('filtro de crise v2: pontuação não cala frase de risco (2.ª revisã
   // pontuação sumia, então cada variante tinha o nível da nota sem pontuação,
   // que é o nível esperado de cada caso da secção 4 (conferido rodando o
   // 7419b6b nas mesmas variantes). Nenhuma variante pode cair de nível.
+  // Casos novos da v2.1: o nível esperado é o da nota sem pontuação.
   test('casos da secção 4 com pontuação entre as palavras não caem de nível', () => {
     const RANK = { alto: 2, medio: 1 };
     const cases = [
@@ -462,5 +461,94 @@ describe('filtro de crise v2: pontuação não cala frase de risco (2.ª revisã
         }
       }
     }
+  });
+});
+
+describe('filtro de crise v2.1: ajustes da lista', () => {
+  test('«desisti da vida/de viver» são MÉDIO; «desisti» sozinho e as exceções não disparam', () => {
+    assert.equal(classifyNote('desisti da vida'), 'medio');
+    assert.equal(classifyNote('eu ja desisti de viver'), 'medio');
+    assert.equal(classifyNote('desisti'), null);
+    assert.equal(classifyNote('desisti do treino'), null);
+    assert.equal(classifyNote('desisti da dieta'), null);
+  });
+
+  test('«desisti da vida» e «desistir de viver» são a mesma ideia; com outra ideia é ALTO', () => {
+    assert.equal(classifyNote('desisti da vida e quero desistir de viver'), 'medio');
+    assert.equal(classifyNote('desisti da vida e nao vejo saida'), 'alto');
+  });
+
+  test('gatilhos em 1.ª pessoa com estou/estava e me fez/faz/fazia querer', () => {
+    for (const note of [
+      'estou pensando em acabar com a vida',
+      'estava pensando em acabar com a vida',
+      'estou querendo acabar com a vida',
+      'estava com vontade de acabar com a vida',
+      'me fez querer acabar com a vida',
+      'me faz querer acabar com a vida',
+      'me fazia querer acabar com a vida',
+      'me fez ter vontade de acabar com a vida'
+    ]) assert.equal(classifyNote(note), 'alto', note);
+  });
+
+  test('enchimento também nas frases sobre outra pessoa', () => {
+    assert.equal(classifyNote('ele quer muito se matar'), 'alto');
+    assert.equal(classifyNote('ela quer mesmo morrer'), 'alto');
+    assert.equal(classifyNote('ele ja tentou de verdade se matar'), 'alto');
+    assert.equal(classifyNote('ele quer muito mesmo agora se matar'), null);
+  });
+
+  test('aparelho ou planta + até 2 palavras neutras + morrer/morreu não dispara', () => {
+    for (const note of [
+      'o celular vai morrer',
+      'a bateria do celular vai morrer hoje',
+      'minha planta morreu',
+      'meu telefone ja vai morrer',
+      'o notebook vai morrer',
+      'a planta morreu hoje',
+      'o celular vai morrer. vou carregar'
+    ]) assert.equal(classifyNote(note), null, note);
+  });
+
+  test('palavra fora da lista neutra, no meio ou no trecho, faz a exceção não valer (revisão do PR)', () => {
+    for (const note of [
+      'o celular faz querer morrer',
+      'celular ele quer morrer',
+      'celular - ele quer morrer',
+      'celular – ele quer morrer',
+      'celular — ele quer morrer',
+      'o celular melhor morrer',
+      'o celular vou querer morrer',
+      'celular vai morrer e eu junto',
+      'suicidar-se o celular vai morrer',
+      'o computador quer morrer'
+    ]) assert.equal(classifyNote(note), 'alto', note);
+  });
+
+  test('travessão corta; hífen dentro da palavra não', () => {
+    assert.equal(classifyNote('quero morrer - de rir nada'), 'alto');
+    assert.equal(classifyNote('quero morrer — velho amigo'), 'alto');
+    assert.equal(classifyNote('quero morrer –\nsaudavel'), 'alto');
+    assert.equal(classifyNote('Vou-me matar.'), 'alto');
+    assert.equal(classifyNote('queria matar-me'), 'alto');
+    assert.equal(classifyNote('vou-me matar de rir'), null);
+  });
+
+  test('a exceção do aparelho não esconde frase de risco', () => {
+    // Mais de 2 palavras entre o aparelho e "morrer": a exceção não vale.
+    assert.equal(classifyNote('o celular do meu pai vai morrer'), 'alto');
+    // Pontuação corta a exceção.
+    assert.equal(classifyNote('o celular, quero morrer'), 'alto');
+    assert.equal(classifyNote('perdi o celular. vou morrer'), 'alto');
+    // Gatilho em 1.ª pessoa logo antes de "morrer": a exceção não vale.
+    assert.equal(classifyNote('larguei o celular e quero morrer'), 'alto');
+    assert.equal(classifyNote('celular quero morrer'), 'alto');
+    // Outra frase de risco na mesma nota.
+    assert.equal(classifyNote('o celular vai morrer e eu quero morrer'), 'alto');
+    assert.equal(classifyNote('minha planta morreu, queria me matar'), 'alto');
+  });
+
+  test('«ela ia me matar se eu chegasse tarde» continua disparando (por design)', () => {
+    assert.equal(classifyNote('ela ia me matar se eu chegasse tarde'), 'alto');
   });
 });

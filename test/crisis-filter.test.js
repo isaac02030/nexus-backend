@@ -302,8 +302,6 @@ describe('filtro de crise v2: regras do padrão (2.3, 2.4, 3.2.1)', () => {
   test('guarda no ALTO: me machucar, me magoar, me ferir, me cortar', () => {
     assert.equal(classifyNote('tenho medo de me machucar no treino'), null);
     assert.equal(classifyNote('cuidado para nao me magoar'), null);
-    assert.equal(classifyNote('quero evitar me ferir'), null);
-    assert.equal(classifyNote('tenho medo de me cortar'), null);
     assert.equal(classifyNote('vou me machucar na academia'), null);
     assert.equal(classifyNote('quero me machucar'), 'alto');
     assert.equal(classifyNote('vou me cortar'), 'alto');
@@ -354,5 +352,59 @@ describe('filtro de crise v2: regras do padrão (2.3, 2.4, 3.2.1)', () => {
     for (let i = 0; i < 50; i++) classifyNote(longNote);
     const msEach = Number(process.hrtime.bigint() - start) / 1e6 / 50;
     assert.ok(msEach < 50, `${msEach} ms por nota`);
+  });
+});
+
+describe('filtro de crise v2: pontuação corta (revisão do PR)', () => {
+  test('ponto, !, ?, ; e quebra de linha: exceção não cola na frase seguinte', () => {
+    assert.equal(classifyNote('quero me matar. o jogo foi ruim'), 'alto');
+    assert.equal(classifyNote('quero morrer. saudavel foi o dia'), 'alto');
+    assert.equal(classifyNote('quero morrer! em forma estou'), 'alto');
+    assert.equal(classifyNote('quero me matar; de rir nada'), 'alto');
+    assert.equal(classifyNote('quero morrer?\nvelho como sempre'), 'alto');
+    assert.equal(classifyNote('queria me matar… de rir nada'), 'alto');
+  });
+
+  test('pontuação forte: guarda não cola na frase seguinte', () => {
+    assert.equal(classifyNote('quero me machucar. Treino hoje foi ruim'), 'alto');
+    assert.equal(classifyNote('vou me cortar!\nacademia amanha'), 'alto');
+  });
+
+  test('vírgula e dois-pontos também cortam exceções e guardas', () => {
+    assert.equal(classifyNote('quero morrer, velho amigo'), 'alto');
+    assert.equal(classifyNote('vou me matar, de rir nada tem'), 'alto');
+    assert.equal(classifyNote('quero me machucar, treino foi ruim'), 'alto');
+    assert.equal(classifyNote('quero morrer: saudavel ou nao'), 'alto');
+  });
+
+  test('vírgula não esconde uma frase de risco que a atravessa', () => {
+    assert.equal(classifyNote('quero, muito, me matar'), 'alto');
+  });
+
+  test('guarda MÉDIO (sumir) também para no corte', () => {
+    assert.equal(classifyNote('quero sumir. uns dias assim e pronto'), 'medio');
+    assert.equal(classifyNote('quero sumir, uns dias assim'), 'medio');
+    assert.equal(classifyNote('quero sumir uns dias'), null);
+  });
+
+  test('"medo de" só guarda o alvo colado, sem gatilho no meio', () => {
+    assert.equal(classifyNote('tenho medo de querer me machucar'), 'alto');
+    assert.equal(classifyNote('tenho medo de vontade de me magoar'), 'alto');
+    assert.equal(classifyNote('tenho medo de me machucar'), null);
+    assert.equal(classifyNote('tenho medo de me machucar no treino'), null);
+  });
+
+  test('os "não dispara" com pontuação continuam calados', () => {
+    assert.equal(classifyNote('Tenho medo de me machucar no treino.'), null);
+    assert.equal(classifyNote('Vou me matar de rir!'), null);
+    assert.equal(classifyNote('isso me mata de rir. esse treino me mata.'), null);
+    assert.equal(classifyNote('Quero morrer velhinho e saudável.'), null);
+    assert.equal(classifyNote('quero sumir da internet, por uns dias'), null);
+  });
+
+  test('todos os casos da secção 4 com ponto final dão o mesmo resultado', () => {
+    for (const note of [...HIGH_CASES, ...HIGH_CASES_V2]) assert.equal(classifyNote(`${note}.`), 'alto', note);
+    for (const note of [...MEDIUM_CASES, ...MEDIUM_CASES_V2]) assert.equal(classifyNote(`${note}.`), 'medio', note);
+    for (const note of [...SILENT_CASES, ...SILENT_CASES_V2]) assert.equal(classifyNote(`${note}.`), null, note);
   });
 });

@@ -408,3 +408,59 @@ describe('filtro de crise v2: pontuação corta (revisão do PR)', () => {
     for (const note of [...SILENT_CASES, ...SILENT_CASES_V2]) assert.equal(classifyNote(`${note}.`), null, note);
   });
 });
+
+describe('filtro de crise v2: pontuação não cala frase de risco (2.ª revisão do PR)', () => {
+  test('pontuação no meio da frase de risco: dispara', () => {
+    assert.equal(classifyNote('nao quero mais. viver'), 'alto');
+    assert.equal(classifyNote('quero. me matar'), 'alto');
+    assert.equal(classifyNote('quero\nmorrer'), 'alto');
+    assert.equal(classifyNote('nao aguento mais... viver assim'), 'alto');
+  });
+
+  test('os casos da 1.ª revisão continuam disparando', () => {
+    const notes = [
+      'quero me machucar. Treino hoje foi ruim',
+      'quero me matar. o jogo foi ruim',
+      'quero morrer. saudavel foi o dia',
+      'quero morrer, velho amigo',
+      'tenho medo de querer me machucar',
+      'quero me matar; de rir nada',
+      'quero morrer! em forma estou',
+      'quero, muito, me matar'
+    ];
+    for (const note of notes) assert.equal(classifyNote(note), 'alto', note);
+  });
+
+  test('exceções e guardas continuam sem atravessar a pontuação', () => {
+    assert.equal(classifyNote('Tenho medo de me machucar no treino.'), null);
+    assert.equal(classifyNote('evitar me machucar'), null);
+    assert.equal(classifyNote('Vou me matar de rir!'), null);
+    assert.equal(classifyNote('quero sumir uns dias'), null);
+    assert.equal(classifyNote('quero sumir. uns dias assim'), 'medio');
+    assert.equal(classifyNote('quero. morrer de rir'), null);
+  });
+
+  // Níveis do commit 7419b6b (antes de a pontuação virar corte): nele a
+  // pontuação sumia, então cada variante tinha o nível da nota sem pontuação,
+  // que é o nível esperado de cada caso da secção 4 (conferido rodando o
+  // 7419b6b nas mesmas variantes). Nenhuma variante pode cair de nível.
+  test('casos da secção 4 com pontuação entre as palavras não caem de nível', () => {
+    const RANK = { alto: 2, medio: 1 };
+    const cases = [
+      ...[...HIGH_CASES, ...HIGH_CASES_V2, ...MEDIUM_CASES_LISTED_AS_HIGH].map(note => [note, 'alto']),
+      ...[...MEDIUM_CASES, ...MEDIUM_CASES_V2].map(note => [note, 'medio']),
+      ...[...SILENT_CASES, ...SILENT_CASES_V2].map(note => [note, null])
+    ];
+    const marks = ['. ', '... ', '\n', ', ', '; ', '! ', ': ', '…'];
+    for (const [note, level] of cases) {
+      const words = note.split(' ');
+      for (let i = 1; i < words.length; i++) {
+        for (const mark of marks) {
+          const variant = words.slice(0, i).join(' ') + mark + words.slice(i).join(' ');
+          const got = classifyNote(variant);
+          assert.ok((RANK[got] || 0) >= (RANK[level] || 0), `${JSON.stringify(variant)}: ${got} < ${level}`);
+        }
+      }
+    }
+  });
+});

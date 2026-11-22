@@ -9,6 +9,8 @@ const jwt      = require('jsonwebtoken');
 const { db } = require('../lib/db');
 const { validateReminderPayload } = require('../lib/reminder-schedule');
 const { checkAdult } = require('../lib/adult-age');
+const { deleteAccountData } = require('../lib/account-deletion');
+const { revokeUserSessions } = require('../lib/revoked-sessions');
 const router   = express.Router();
 
 const REGISTER_UNAVAILABLE_MESSAGE = 'O cadastro não está disponível agora. Tente de novo mais tarde.';
@@ -252,6 +254,62 @@ router.put('/profile', auth, async (req, res) => {
 
   } catch (err) {
     res.status(500).json({ error: 'Erro ao atualizar perfil.' });
+  }
+});
+
+// ============================================
+// EXCLUIR A CONTA
+// DELETE /api/users/me
+// Body: { password }
+//
+// Pede a senha atual (spec da Clara: «Digite sua senha para confirmar»).
+// Senha errada: 403 com code "wrong_password" e nada apagado. Apaga tudo
+// numa transação (lib/account-deletion.js) e encerra as sessões da pessoa
+// neste servidor (lib/revoked-sessions.js). Sem prazo de arrependimento:
+// apaga na hora (pergunta em aberto no PR). Nada do pedido vai para log.
+// ============================================
+const ACCOUNT_DELETE_PASSWORD_MESSAGE = 'Digite sua senha para confirmar.';
+const ACCOUNT_DELETE_WRONG_PASSWORD_MESSAGE = 'Senha incorreta. Sua conta não foi excluída.';
+const ACCOUNT_DELETE_FAILED_MESSAGE = 'Não foi possível excluir agora. Tente de novo.';
+
+router.delete('/me', auth, async (req, res) => {
+  const userId = Number(req.user.userId);
+  const password = req.body?.password;
+
+  if (typeof password !== 'string' || password.length === 0 || password.length > 200) {
+    return res.status(400).json({ error: ACCOUNT_DELETE_PASSWORD_MESSAGE, code: 'password_required' });
+  }
+
+  let client;
+  try {
+    client = await db.connect();
+    await client.query('BEGIN');
+    // Trava a linha da pessoa: um check-in, post ou mensagem ao mesmo tempo
+    // espera e depois falha pela chave estrangeira, sem deixar resto.
+    const userRes = await client.query(
+      'SELECT id, password FROM users WHERE id = $1 FOR UPDATE',
+      [userId]
+    );
+    const user = userRes.rows[0];
+    const valid = user ? await bcrypt.compare(password, user.password) : false;
+    if (!valid) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: ACCOUNT_DELETE_WRONG_PASSWORD_MESSAGE, code: 'wrong_password' });
+    }
+
+    await deleteAccountData(client, userId);
+    await client.query('COMMIT');
+    revokeUserSessions(userId);
+    return res.json({ deleted: true });
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
+    }
+    // Só o tipo do erro: nada do pedido nem dos dados.
+    console.error('Account deletion error:', (err && (err.code || err.name)) || 'unknown');
+    return res.status(500).json({ error: ACCOUNT_DELETE_FAILED_MESSAGE });
+  } finally {
+    if (client) client.release();
   }
 });
 

@@ -5,6 +5,7 @@
 // ============================================
 
 const jwt = require('jsonwebtoken');
+const { isUserRevoked } = require('../lib/revoked-sessions');
 
 function auth(req, res, next) {
   // O token vem no header: Authorization: Bearer <token>
@@ -17,6 +18,10 @@ function auth(req, res, next) {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    // Conta excluída: o token dela deixa de valer (lib/revoked-sessions.js).
+    if (decoded && isUserRevoked(decoded.userId)) {
+      return res.status(401).json({ error: 'Sessão encerrada. Entre de novo.' });
+    }
     req.user = decoded; // Guardamos os dados do utilizador na req
     next();             // Continua para a rota seguinte
   } catch (err) {

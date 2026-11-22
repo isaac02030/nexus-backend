@@ -132,6 +132,17 @@ router.post('/register', async (req, res) => {
 // POST /api/users/login
 // Body: { email, password }
 // ============================================
+// Campos da pessoa que voltam no login e no /me (lista fechada).
+const PUBLIC_USER_FIELDS = ['id', 'username', 'email', 'bio', 'avatar_url', 'created_at', 'updated_at', 'adult_confirmed'];
+
+function publicUser(row) {
+  const user = {};
+  for (const field of PUBLIC_USER_FIELDS) user[field] = row[field] === undefined ? null : row[field];
+  user.adult_confirmed = row.adult_confirmed === true;
+  user.legal = legalStatus(row);
+  return user;
+}
+
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
 
@@ -140,9 +151,15 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    // Procurar o utilizador pelo email
+    // Lista fechada de campos (achado do Argos no PR 28): nada de
+    // SELECT *, para coluna nova (consentimentos, aceites, lembretes) não
+    // sair crua na resposta. A senha só serve para comparar e não volta.
     const result = await db.query(
-      'SELECT * FROM users WHERE email = $1',
+      `SELECT id, username, email, password, bio, avatar_url, created_at, updated_at,
+              (to_jsonb(users) ->> 'adult_confirmed_at') IS NOT NULL AS adult_confirmed,
+              ${LEGAL_SELECT}
+       FROM users
+       WHERE email = $1`,
       [email]
     );
 
@@ -165,11 +182,9 @@ router.post('/login', async (req, res) => {
       { expiresIn: '7d' }
     );
 
-    // Devolver utilizador (sem a password) + token
-    // legal.needs_acceptance: o site mostra a tela de reaceitação.
-    const { password: _, ...userSafe } = user;
-    userSafe.legal = legalStatus(user);
-    res.json({ user: userSafe, token });
+    // Os mesmos campos do /me. legal.needs_acceptance: o site mostra a
+    // tela de reaceitação.
+    res.json({ user: publicUser(user), token });
 
   } catch (err) {
     res.status(500).json({ error: 'Erro ao fazer login.' });

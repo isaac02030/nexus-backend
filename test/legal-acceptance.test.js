@@ -94,12 +94,19 @@ function handle(sql, params = []) {
     return { rows: [legalOf(user)], rowCount: 1 };
   }
 
-  if (/^SELECT \* FROM users WHERE email = \$1$/.test(text)) {
+  // Login: lista fechada de campos (sem SELECT *).
+  if (/^SELECT id, username, email, password, bio, avatar_url, created_at, updated_at,/.test(text)
+    && /FROM users WHERE email = \$1$/.test(text)) {
+    assert.doesNotMatch(text, /SELECT \*/);
     const user = db.users.find((u) => u.email === params[0]);
     if (!user) return { rows: [] };
-    const row = { ...user };
-    if (!db.migrated) for (const col of LEGAL_COLUMNS) delete row[col];
-    return { rows: [row] };
+    return {
+      rows: [{
+        id: user.id, username: user.username, email: user.email, password: user.password,
+        bio: null, avatar_url: null, created_at: user.adult_confirmed_at, updated_at: user.adult_confirmed_at,
+        adult_confirmed: true, ...legalOf(user)
+      }]
+    };
   }
 
   if (/FROM users WHERE id = \$1$/.test(text) && /to_jsonb\(users\) ->> 'terms_version'/.test(text)) {
@@ -313,6 +320,37 @@ describe('aceite dos termos e da privacidade', { concurrency: 1 }, () => {
     assert.equal(res.status, 200);
     assert.equal(res.body.user.legal.needs_acceptance, true);
     assert.equal(res.body.user.password, undefined);
+  });
+
+  test('negado: o login não devolve colunas cruas (só a lista fechada + legal)', async () => {
+    // Colunas que existem no banco e NÃO podem sair no login.
+    seedUser(1, {
+      terms_version: 'beta-1', terms_accepted_at: new Date(), privacy_version: 'beta-1', privacy_accepted_at: new Date(),
+      note_consent: true, reminders_opt_in: true, news_opt_in: false, reminder_time: '08:00', timezone: 'Europe/Lisbon'
+    });
+    const res = await request('POST', '/api/users/login', {
+      body: { email: 'conta1@exemplo.test', password: 'senha-de-teste' }
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(Object.keys(res.body.user).sort(), [
+      'adult_confirmed', 'avatar_url', 'bio', 'created_at', 'email', 'id', 'legal', 'updated_at', 'username'
+    ]);
+    assert.equal(res.body.user.legal.needs_acceptance, false);
+    for (const raw of ['password', 'terms_version', 'note_consent', 'reminders_opt_in', 'adult_confirmed_at', 'reminder_time']) {
+      assert.ok(!(raw in res.body.user), raw);
+    }
+    assert.ok(!JSON.stringify(res.body).includes(hash), 'o hash da senha não sai');
+    const query = db.queries.find((q) => /FROM users WHERE email/.test(q.text));
+    assert.doesNotMatch(query.text, /SELECT \*/);
+  });
+
+  test('negado: login com senha errada ou e-mail que não existe → 401', async () => {
+    seedUser(1);
+    const wrong = await request('POST', '/api/users/login', { body: { email: 'conta1@exemplo.test', password: 'errada' } });
+    assert.equal(wrong.status, 401);
+    assert.equal(wrong.body.user, undefined);
+    const none = await request('POST', '/api/users/login', { body: { email: 'ninguem@exemplo.test', password: 'senha-de-teste' } });
+    assert.equal(none.status, 401);
   });
 
   test('sem a migração 008: /me e login funcionam e pedem o aceite', async () => {

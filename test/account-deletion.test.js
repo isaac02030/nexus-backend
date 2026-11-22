@@ -374,12 +374,12 @@ describe('lista de exclusão cobre o banco', () => {
     assert.equal(normalize(ACCOUNT_DELETION_STEPS[ACCOUNT_DELETION_STEPS.length - 1].sql), 'DELETE FROM users WHERE id = $1');
   });
 
-  test('ordem: pares antes da troca de dono; troca de dono antes de apagar registros e missões', () => {
+  test('ordem: troca de dono primeiro (vê os pares), depois pares, registros e missões', () => {
     const at = name => ACCOUNT_DELETION_STEPS.findIndex(step => step.name === name);
     const transfer = at('missoes_passadas_ao_parceiro');
-    assert.ok(transfer > 0);
+    assert.equal(transfer, 0);
+    assert.ok(transfer < at('pares_das_missoes'));
     assert.ok(at('missao_do_outro_lado_do_par') < at('pares_das_missoes'));
-    assert.ok(at('pares_das_missoes') < transfer);
     for (const later of ['fusoes_apontando_para_as_missoes', 'checkins', 'mensagens', 'registro_de_avisos', 'missoes', 'conta']) {
       assert.ok(transfer < at(later), `${later} antes da troca de dono`);
     }
@@ -399,6 +399,8 @@ describe('lista de exclusão cobre o banco', () => {
     assert.ok(transfer.includes(`title = '${TRANSFERRED_MISSION_TITLE}'`));
     assert.doesNotMatch(transfer, /started_at = (?!NULL)/);
     assert.match(transfer, /WHERE user_id = \$1 AND partner_id IS NOT NULL/);
+    // Missão em par por mission_matches (ativo ou encerrado) não passa ao outro.
+    assert.match(transfer, /AND NOT EXISTS \( SELECT 1 FROM mission_matches mm WHERE mm\.mission_a_id = missions\.id OR mm\.mission_b_id = missions\.id \)/);
   });
 
   test('o outro lado do par só muda em par ativo', () => {

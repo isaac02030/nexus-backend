@@ -92,17 +92,24 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
       x.partnerStarted || null, x.userScore || 0, x.partnerScore || 0, x.uc || null, x.pc || null, x.merged || null]);
   await mission(10, A, B, 'parceiro', { uc: 'contato-A-10', pc: 'contato-B-10', userScore: 1, partnerScore: 1, partnerStarted: new Date() });
   await mission(11, B, A, 'parceiro', { uc: 'contato-B-11', pc: 'contato-A-11' });
-  await mission(12, A, null, 'rival');
+  // Par por mission_matches como routes/missions.js grava: partner_id nas
+  // DUAS missões (achado do Argos no PR 26).
+  await mission(12, A, C, 'rival');
   await mission(13, C, A, 'rival');
   await mission(14, C, null, 'solo', { merged: 12 });
   await mission(18, C, D, 'parceiro');
   await mission(19, A, null, 'solo');
   await mission(20, C, null, 'rival');
   await mission(30, E, null, 'solo');
+  // Par encerrado em que a missão de A ainda tem partner_id (dado antigo):
+  // também não pode passar ao outro.
+  await mission(21, A, D, 'parceiro');
+  await mission(22, D, A, 'parceiro');
   await q(`INSERT INTO mission_matches (mission_a_id, mission_b_id, mode) VALUES (12, 13, 'rival')`);
   await q(`INSERT INTO mission_matches (mission_a_id, mission_b_id, mode, status, ended_at) VALUES (19, 18, 'parceiro', 'ended', NOW())`);
   await q(`INSERT INTO mission_matches (mission_a_id, mission_b_id, mode) VALUES (20, 12, 'rival')`);
   await q("UPDATE mission_matches SET status = 'ended' WHERE mission_a_id = 20");
+  await q(`INSERT INTO mission_matches (mission_a_id, mission_b_id, mode, status, ended_at) VALUES (21, 22, 'parceiro', 'ended', NOW())`);
   const ck = (mid, uid, note) => q(`INSERT INTO checkins (mission_id, user_id, day_number, completed, note) VALUES ($1,$2,1,true,$3)`, [mid, uid, note]);
   await ck(10, A, 'nota-A-10'); await ck(10, B, 'nota-B-10'); await ck(11, A, 'nota-A-11'); await ck(11, B, 'nota-B-11');
   await ck(12, A, 'nota-A-12'); await ck(13, C, 'nota-C-13'); await ck(30, E, 'nota-E-30');
@@ -139,6 +146,9 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
 
   // ---- A sai (dono de Duo, parceiro em Duo, Rival por par, solo) ----
   const m10Before = await one('SELECT started_at FROM missions WHERE id = 10');
+  const missionsOf = async (id) => (await q('SELECT id FROM missions WHERE user_id = $1 ORDER BY id', [id])).rows.map(r => r.id);
+  const cBefore = await missionsOf(C);
+  const dBefore = await missionsOf(D);
   const ok = await call('DELETE', '/api/users/me', { tok: token(A), body: { password: PASSWORD } });
   assert.equal(ok.status, 200);
 
@@ -192,8 +202,18 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
   const m20 = await one('SELECT * FROM missions WHERE id = 20');
   assert.equal(m20.mode, 'rival');
 
-  // Missões só de A saem inteiras; fusão não fica órfã; nenhum par sobra.
-  assert.equal((await one('SELECT COUNT(*)::int n FROM missions WHERE id IN (12, 19)')).n, 0);
+  // Caso negado do par: a missão de A no par NÃO passa a C nem a D. Cada um
+  // fica exatamente com as missões que já tinha (nenhuma «Missão sem título»).
+  assert.deepEqual(await missionsOf(C), cBefore);
+  assert.deepEqual(await missionsOf(D), dBefore);
+  assert.equal((await one('SELECT COUNT(*)::int n FROM missions WHERE title = $1', [TRANSFERRED_MISSION_TITLE])).n, 1);
+  assert.equal((await one('SELECT COUNT(*)::int n FROM missions WHERE user_id = $1 AND status = $2', [C, 'active'])).n, cBefore.length);
+  const m22 = await one('SELECT * FROM missions WHERE id = 22');
+  assert.equal(m22.partner_id, null);
+  assert.equal(m22.mode, 'solo');
+
+  // Missões só de A (e as do par) saem inteiras; fusão não fica órfã; nenhum par sobra.
+  assert.equal((await one('SELECT COUNT(*)::int n FROM missions WHERE id IN (12, 19, 21)')).n, 0);
   assert.equal((await one('SELECT merged_into_id FROM missions WHERE id = 14')).merged_into_id, null);
   assert.equal((await one('SELECT COUNT(*)::int n FROM mission_matches')).n, 0);
 
@@ -207,7 +227,7 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
       }
       if (table === 'users') assert.notEqual(row.id, A);
       if (table !== 'communities' && table !== 'community_missions') {
-        for (const s of ['-A', 'alfa', 'denuncia-sobre-A', '-12', '-19']) assert.ok(!j.includes(s), `${table}: sobrou ${s}`);
+        for (const s of ['-A', 'alfa', 'denuncia-sobre-A', 'titulo-12', 'titulo-19', 'titulo-21', 'porque-10']) assert.ok(!j.includes(s), `${table}: sobrou ${s}`);
       }
     }
   }

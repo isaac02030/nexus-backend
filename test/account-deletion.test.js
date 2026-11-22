@@ -15,6 +15,7 @@ process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
 
 const usersRouter = require('../routes/users');
 const { ACCOUNT_DELETION_STEPS } = require('../lib/account-deletion');
+const { resetAllAttempts, MAX_WRONG } = require('../lib/password-attempts');
 
 const app = express();
 app.use(express.json());
@@ -25,7 +26,7 @@ const PASSWORD_B = 'senha-certa-de-b';
 const HASH_A = bcrypt.hashSync(PASSWORD_A, 4);
 const HASH_B = bcrypt.hashSync(PASSWORD_B, 4);
 
-const state = { users: new Map(), queries: [], failAt: null, released: 0 };
+const state = { users: new Map(), queries: [], failAt: null, released: 0, dbDown: false };
 const logged = [];
 
 function normalize(sql) {
@@ -36,8 +37,11 @@ function resetState() {
   state.users = new Map([
     [2, { id: 2, username: 'alfa', email: 'alfa@exemplo.test', password: HASH_A }],
     [3, { id: 3, username: 'beta', email: 'beta@exemplo.test', password: HASH_B }],
-    [4, { id: 4, username: 'gama', email: 'gama@exemplo.test', password: HASH_A }]
+    [4, { id: 4, username: 'gama', email: 'gama@exemplo.test', password: HASH_A }],
+    [1, { id: 1, username: 'admin', email: 'admin@exemplo.test', password: HASH_A }]
   ]);
+  state.dbDown = false;
+  resetAllAttempts();
   state.queries = [];
   state.failAt = null;
   state.released = 0;
@@ -78,6 +82,11 @@ function makeClient() {
 
 function poolQuery(sql, params = []) {
   const text = normalize(sql);
+  if (state.dbDown) {
+    const err = new Error('connect ECONNREFUSED');
+    err.code = 'ECONNREFUSED';
+    return Promise.reject(err);
+  }
   state.queries.push({ text, params, pool: true });
   if (/^SELECT \* FROM users WHERE email = \$1$/.test(text)) {
     const user = [...state.users.values()].find(item => item.email === params[0]);
@@ -136,7 +145,7 @@ describe('excluir a conta', { concurrency: 1 }, () => {
     const res = await request('DELETE', '/api/users/me', { body: { password: PASSWORD_A } });
     assert.equal(res.status, 401);
     assert.equal(writes().length, 0);
-    assert.equal(state.users.size, 3);
+    assert.equal(state.users.size, 4);
   });
 
   test('sem senha: 400 e nada muda', async () => {
@@ -187,8 +196,6 @@ describe('excluir a conta', { concurrency: 1 }, () => {
     assert.equal(state.released, 1);
   });
 
-  // As sessões encerradas ficam na memória do processo: cada teste que
-  // apaga usa uma conta diferente.
   test('depois de apagar: o login falha, o token antigo não vale e a outra pessoa segue', async () => {
     const del = await request('DELETE', '/api/users/me', { token: tokenFor(4), body: { password: PASSWORD_A } });
     assert.equal(del.status, 200);
@@ -219,9 +226,90 @@ describe('excluir a conta', { concurrency: 1 }, () => {
     assert.equal(res.raw.includes('nota-secreta'), false);
     assert.equal(logged.join('\n').includes('nota-secreta'), false);
     assert.equal(logged.join('\n').includes(PASSWORD_B), false);
-    // A sessão não foi encerrada: a conta ainda existe.
+    // A conta ainda existe: a sessão segue valendo.
     const me = await request('GET', '/api/users/me', { token: tokenFor(3) });
     assert.equal(me.status, 200);
+  });
+});
+
+describe('excluir a conta: segurança', { concurrency: 1 }, () => {
+  before(async () => {
+    mock.method(Pool.prototype, 'query', (sql, params) => poolQuery(sql, params));
+    mock.method(Pool.prototype, 'connect', async () => makeClient());
+    mock.method(console, 'error', (...args) => { logged.push(args.map(String).join(' ')); });
+    await new Promise((resolve) => {
+      server = http.createServer(app).listen(0, '127.0.0.1', resolve);
+    });
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+
+  beforeEach(resetState);
+
+  after(async () => {
+    mock.restoreAll();
+    if (server) await new Promise((resolve) => server.close(resolve));
+  });
+
+  test('token de conta apagada é recusado sem lista na memória (conta sumiu do banco)', async () => {
+    // Simula outro processo ou um reinício: a conta some do banco sem passar
+    // por esta rota.
+    state.users.delete(3);
+    const me = await request('GET', '/api/users/me', { token: tokenFor(3) });
+    assert.equal(me.status, 401);
+    assert.equal(me.body.code, 'session_ended');
+    const del = await request('DELETE', '/api/users/me', { token: tokenFor(3), body: { password: PASSWORD_B } });
+    assert.equal(del.status, 401);
+    assert.equal(writes().length, 0);
+  });
+
+  test('banco fora: 503 e o pedido não passa (falha fechado)', async () => {
+    state.dbDown = true;
+    const me = await request('GET', '/api/users/me', { token: tokenFor(2) });
+    assert.equal(me.status, 503);
+    assert.equal(me.body.code, 'auth_unavailable');
+    const del = await request('DELETE', '/api/users/me', { token: tokenFor(2), body: { password: PASSWORD_A } });
+    assert.equal(del.status, 503);
+    assert.equal(state.users.has(2), true);
+    assert.equal(writes().length, 0);
+  });
+
+  test('token com id que não é número: 401 sem consultar o banco', async () => {
+    const me = await request('GET', '/api/users/me', { token: jwt.sign({ userId: 'abc' }, process.env.JWT_SECRET) });
+    assert.equal(me.status, 401);
+    assert.equal(state.queries.length, 0);
+  });
+
+  test('admin não exclui a própria conta por esta rota (403), nem com a senha certa', async () => {
+    const res = await request('DELETE', '/api/users/me', { token: tokenFor(1), body: { password: PASSWORD_A } });
+    assert.equal(res.status, 403);
+    assert.equal(res.body.code, 'admin_account');
+    assert.equal(state.users.has(1), true);
+    assert.equal(writes().length, 0);
+  });
+
+  test(`excesso de tentativas: na ${MAX_WRONG}.ª senha errada bloqueia, e a certa também fica bloqueada`, async () => {
+    for (let i = 1; i < MAX_WRONG; i += 1) {
+      const wrong = await request('DELETE', '/api/users/me', { token: tokenFor(2), body: { password: `errada-${i}` } });
+      assert.equal(wrong.status, 403, `tentativa ${i}`);
+    }
+    const last = await request('DELETE', '/api/users/me', { token: tokenFor(2), body: { password: 'errada-final' } });
+    assert.equal(last.status, 429);
+    assert.equal(last.body.code, 'too_many_attempts');
+    const right = await request('DELETE', '/api/users/me', { token: tokenFor(2), body: { password: PASSWORD_A } });
+    assert.equal(right.status, 429);
+    assert.equal(state.users.has(2), true);
+    assert.equal(writes().length, 0);
+    // A trava é por conta: outra pessoa segue podendo.
+    const other = await request('DELETE', '/api/users/me', { token: tokenFor(3), body: { password: 'errada' } });
+    assert.equal(other.status, 403);
+  });
+
+  test('senha certa antes do limite zera a contagem', async () => {
+    for (let i = 1; i < MAX_WRONG; i += 1) {
+      await request('DELETE', '/api/users/me', { token: tokenFor(4), body: { password: `errada-${i}` } });
+    }
+    const ok = await request('DELETE', '/api/users/me', { token: tokenFor(4), body: { password: PASSWORD_A } });
+    assert.equal(ok.status, 200);
   });
 });
 

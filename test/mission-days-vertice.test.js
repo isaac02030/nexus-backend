@@ -11,6 +11,7 @@ const jwt = require('jsonwebtoken');
 const express = require('express');
 const webpush = require('web-push');
 const { Pool } = require('pg');
+const { withAuthDb } = require('./helpers/auth-db');
 const {
   FREE_DAY_CHECKIN_MESSAGE,
   startWeekdayFor,
@@ -124,7 +125,7 @@ const tokenFor = userId => jwt.sign({ userId }, process.env.JWT_SECRET);
 
 describe('Grande Irmão e dias livres', { concurrency: 1 }, () => {
   before(async () => {
-    mock.method(Pool.prototype, 'query', async (sql, params) => handle(sql, params));
+    mock.method(Pool.prototype, 'query', withAuthDb(async (sql, params) => handle(sql, params)));
     mock.method(webpush, 'sendNotification', async (_sub, payload) => {
       state.pushes.push({ userId: lastPushUser, ...JSON.parse(payload) });
     });

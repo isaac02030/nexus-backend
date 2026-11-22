@@ -7,6 +7,7 @@ const http = require('node:http');
 const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
+const { withAuthDb } = require('./helpers/auth-db');
 const {
   REMINDER_TIME_MESSAGE,
   TIMEZONE_MESSAGE
@@ -79,7 +80,7 @@ async function request(method, path, { token, body } = {}) {
 
 describe('lembrete da propria pessoa', { concurrency: 1 }, () => {
   before(async () => {
-    mock.method(Pool.prototype, 'query', handleQuery);
+    mock.method(Pool.prototype, 'query', withAuthDb(handleQuery));
     await new Promise((resolve) => {
       server = http.createServer(app).listen(0, '127.0.0.1', resolve);
     });

@@ -8,6 +8,7 @@ const { EventEmitter } = require('node:events');
 const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
+const { withAuthDb } = require('./helpers/auth-db');
 
 process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
@@ -89,7 +90,7 @@ function loggedText() {
 describe('assistente: filtro de crise e erro sem eco', { concurrency: 1 }, () => {
   before(async () => {
     process.env.OPENAI_API_KEY = 'chave-falsa-de-teste';
-    mock.method(Pool.prototype, 'query', (sql, params) => handleQuery(sql, params));
+    mock.method(Pool.prototype, 'query', withAuthDb((sql, params) => handleQuery(sql, params)));
     mock.method(console, 'error', (...args) => { logged.push(args); });
     mock.method(console, 'log', (...args) => { logged.push(args); });
     // Intercepta a OpenAI: guarda o corpo e responde conforme providerReply.

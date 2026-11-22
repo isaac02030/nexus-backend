@@ -8,6 +8,12 @@ const { classifyNote } = require('../lib/crisis-filter');
 // O casador por partes tem de dar o MESMO resultado da tabela expandida
 // (cópia congelada do PR 21 em referencia/). Os dois módulos são carregados
 // com as partes internas expostas, só para este teste.
+//
+// v2.2: a lista mudou de propósito (frases novas, exceções novas). Por isso
+// a comparação passou a ser: (1) a v2.2 nunca fica ABAIXO da v2.1, a não
+// ser onde uma exceção nova da v2.2 cortou a nota; (2) toda frase da v2.1
+// continua com a mesma entrada; (3) as candidatas da v2.1 continuam lá,
+// na mesma ordem, quando as exceções não mudaram a nota.
 const REFERENCE = path.join(__dirname, '..', 'referencia', 'crisis-filter-tabela-v2.1.js');
 const CURRENT = path.join(__dirname, '..', 'lib', 'crisis-filter.js');
 
@@ -116,20 +122,31 @@ function buildNotes() {
   return cachedNotes;
 }
 
-test('casador por partes = tabela expandida (PR 21) em todas as notas do conjunto', () => {
+const RANK = { alto: 2, medio: 1 };
+const rank = level => RANK[level] || 0;
+
+test('v2.2 nunca fica abaixo da tabela expandida (PR 21), fora das exceções novas', () => {
   const notes = buildNotes();
   assert.ok(notes.length > 50000, `conjunto pequeno demais: ${notes.length}`);
-  const diffs = [];
+  const lower = [];
+  let higher = 0;
   const levels = { alto: 0, medio: 0, nada: 0 };
   for (const note of notes) {
     const expected = reference.classifyNote(note);
     const got = classifyNote(note);
     levels[expected || 'nada']++;
-    if (got !== expected) diffs.push({ note, expected, got });
+    if (rank(got) > rank(expected)) higher++;
+    if (rank(got) >= rank(expected)) continue;
+    // Só pode descer se uma exceção nova da v2.2 cortou a nota.
+    const tokensRef = parts.removeExceptions(parts.tokenize(note));
+    const tokensNow = now.removeExceptions(now.tokenize(note));
+    if (JSON.stringify(tokensNow) === JSON.stringify(tokensRef)) lower.push({ note, expected, got });
   }
   // O conjunto precisa ter os três níveis em quantidade, senão o teste não prova nada.
   for (const level of Object.keys(levels)) assert.ok(levels[level] > 1000, `poucos casos ${level}: ${levels[level]}`);
-  assert.deepEqual(diffs.slice(0, 10), [], `${diffs.length} diferenças em ${notes.length} notas`);
+  // As frases novas da v2.2 aparecem no conjunto (senão a comparação não mede nada novo).
+  assert.ok(higher > 100, `poucas notas subiram: ${higher}`);
+  assert.deepEqual(lower.slice(0, 10), [], `${lower.length} notas desceram sem exceção nova`);
 });
 
 // A tabela expandida inteira: cada frase dela é reconhecida por partes com
@@ -153,21 +170,27 @@ test('cada frase da tabela expandida tem a mesma entrada no casador por partes',
   }
 });
 
-// As frases candidatas de cada nota (nas duas leituras), na mesma ordem.
-test('mesmas frases candidatas, na mesma ordem, para cada nota do conjunto', () => {
+// As frases candidatas da v2.1 (nas duas leituras) continuam lá, na mesma
+// ordem, sempre que as exceções deixam a nota igual. A v2.2 pode somar frases.
+test('candidatas da v2.1 continuam, na mesma ordem, em cada nota do conjunto', () => {
   const notes = buildNotes();
+  let compared = 0;
   for (const note of notes) {
     const tokensRef = parts.removeExceptions(parts.tokenize(note));
     const tokensNow = now.removeExceptions(now.tokenize(note));
-    assert.deepEqual(tokensNow, tokensRef, JSON.stringify(note));
+    if (JSON.stringify(tokensNow) !== JSON.stringify(tokensRef)) continue;
+    compared++;
     for (const name of ['HIGH', 'MEDIUM']) {
       for (const crossSoft of [false, true]) {
         const ref = parts.candidates(parts[name], tokensRef, crossSoft).map(options);
-        const got = now.candidates(now[name], tokensNow, crossSoft).map(options);
+        const refPhrases = new Set(ref.map(entry => entry[0]));
+        const got = now.candidates(now[name], tokensNow, crossSoft).map(options)
+          .filter(entry => refPhrases.has(entry[0]));
         if (got.length !== ref.length || got.some((entry, i) => JSON.stringify(entry) !== JSON.stringify(ref[i]))) {
           assert.deepEqual(got, ref, `${name} ${crossSoft}: ${JSON.stringify(note)}`);
         }
       }
     }
   }
+  assert.ok(compared > notes.length * 0.9, `poucas notas comparadas: ${compared} de ${notes.length}`);
 });

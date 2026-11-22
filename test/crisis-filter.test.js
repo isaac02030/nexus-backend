@@ -280,8 +280,9 @@ describe('filtro de crise v2: regras do padrão (2.3, 2.4, 3.2.1)', () => {
     assert.equal(classifyNote('pensei em me sucidar'), 'alto');
   });
 
+  // «me matar» sozinho no trecho passou a disparar na v2.2 (ver os testes da v2.2).
   test('alvo sozinho, sem gatilho, não dispara', () => {
-    for (const note of ['me matar', 'morrer', 'sumir', 'desaparecer', 'estar morto', 'nao existir', 'acabar com tudo']) {
+    for (const note of ['morrer', 'sumir', 'desaparecer', 'estar morto', 'nao existir', 'acabar com tudo']) {
       assert.equal(classifyNote(note), null, note);
     }
   });
@@ -550,5 +551,188 @@ describe('filtro de crise v2.1: ajustes da lista', () => {
 
   test('«ela ia me matar se eu chegasse tarde» continua disparando (por design)', () => {
     assert.equal(classifyNote('ela ia me matar se eu chegasse tarde'), 'alto');
+  });
+});
+
+// v2.2: casos da proposta (secção 4) e um caso negado para cada termo novo.
+// Frases inventadas e genéricas, sem dados de ninguém.
+describe('filtro de crise v2.2: «matar-me» sozinho (1.1 a 1.3)', () => {
+  test('casos 4.1 da proposta disparam ALTO', () => {
+    for (const note of [
+      'Matar-me.', 'matar-me hoje', 'mato-me', 'eu me mato', 'matei-me ontem', 'matar-me-ei',
+      'hei de matar-me', 'mais vale matar-me', 'ele matou-se', 'matarme', 'mematar', 'suicidar-me.',
+      'nao me mato', 'nunca me matei'
+    ]) assert.equal(classifyNote(note), 'alto', note);
+  });
+
+  test('cada forma nova da 1.1 dispara sozinha', () => {
+    for (const note of [
+      'mato-me', 'me mato', 'matei-me', 'me matei', 'matar-me-ei', 'matarei-me',
+      'matou-se', 'se matou', 'mataram-se', 'se mataram', 'mematar', 'matarme',
+      'mesuicidar', 'suicidarme', 'suicidar-me', 'me suicidar', 'me suicidei', 'suicidei-me'
+    ]) {
+      assert.equal(classifyNote(note), 'alto', note);
+      assert.equal(classifyNote(`hoje ${note} de novo.`), 'alto', `no meio: ${note}`);
+    }
+  });
+
+  test('infinitivo nu só dispara quando o trecho é só ele (+ até 2 palavras de enchimento)', () => {
+    for (const note of ['Matar-me.', 'me matar', 'Matar-se?', 'me matar hoje', 'so matar-me', 'me matar de vez',
+      'o dia foi longo. Matar-me.', 'cansei, me matar mesmo']) {
+      assert.equal(classifyNote(note), 'alto', note);
+    }
+  });
+
+  test('infinitivo nu com outras palavras no trecho não dispara (casos negados)', () => {
+    for (const note of [
+      'isto vai matar-me', 'o pai vai matar-me se descobrir', 'o chefe vai me matar',
+      'a minha mae vai matar-me', 'ele vai matar-se de rir', 'me matar hoje nao da tempo',
+      'so me matar de vez mesmo'
+    ]) assert.equal(classifyNote(note), null, note);
+  });
+
+  test('gatilhos novos (1.2) com «matar-me», «me matar» e «me suicidar»', () => {
+    for (const trigger of ['hei de', 'devia', 'devo', 'mais vale', 'melhor era', 'talvez devesse']) {
+      for (const target of ['matar-me', 'me matar', 'me suicidar']) {
+        assert.equal(classifyNote(`${trigger} ${target} amanha`), 'alto', `${trigger} ${target}`);
+        assert.equal(classifyNote(`${trigger} mesmo ${target} amanha`), 'alto', `${trigger} mesmo ${target}`);
+      }
+    }
+  });
+
+  test('gatilhos novos não pegam outros alvos nem frase sem alvo (casos negados)', () => {
+    for (const note of [
+      'devia treinar mais', 'devo estudar hoje', 'hei de conseguir', 'mais vale tarde que nunca',
+      'melhor era ter ido', 'talvez devesse descansar', 'devia sumir uns dias',
+      'devo ver o me matar amanha'
+    ]) assert.equal(classifyNote(note), null, note);
+  });
+
+  test('exceções «a/de + verbo» e jogo valem para as formas de «matar» (casos 4.3)', () => {
+    for (const note of [
+      'mato-me a trabalhar', 'me matei de estudar', 'matei-me de rir', 'matar-me de tanto treinar',
+      'me mato a limpar a casa', 'matei-me a cozinhar', 'mato-me de trabalho', 'me matei de estudo',
+      'ele matou-se a correr', 'se mataram de rir', 'eles mataram-se de tanto trabalhar',
+      'me matei no jogo', 'mato-me na partida', 'matou-se na final', 'se matou na quadra',
+      'matar-me-ei a estudar', 'devia matar-me a estudar', 'hei de me matar de tanto estudar',
+      'isso me mata de rir', 'a saudade mata-me'
+    ]) assert.equal(classifyNote(note), null, note);
+  });
+
+  test('exceção não cola depois da pontuação nem com outra palavra (casos negados)', () => {
+    for (const note of [
+      'mato-me. a trabalhar amanha', 'me matei, de rir nada', 'matei-me de verdade',
+      'mato-me a serio', 'me matei hoje a noite'
+    ]) assert.equal(classifyNote(note), 'alto', note);
+  });
+
+  test('guarda do substantivo «mato» (floresta)', () => {
+    for (const note of [
+      'perdi-me no mato me escondi', 'saiu do mato me chamando', 'passei pelo mato me arranhei',
+      'fui ao mato me esconder', 'era um mato me disseram', 'cortei o mato me cansei'
+    ]) assert.equal(classifyNote(note), null, note);
+  });
+
+  test('guarda do «mato» só vale colada e não atravessa pontuação (casos negados)', () => {
+    for (const note of ['eu mato-me', 'no fim mato-me', 'fiquei no mato. me mato', 'o mato, me mato']) {
+      assert.equal(classifyNote(note), 'alto', note);
+    }
+  });
+
+  test('suicidar sem exceção de «a/de + verbo» (nada na proposta pede isso)', () => {
+    for (const note of ['vou me suicidar de tanto trabalhar', 'suicidar-me de rir', 'me suicidei no jogo']) {
+      assert.equal(classifyNote(note), 'alto', note);
+    }
+  });
+});
+
+describe('filtro de crise v2.2: «e eu junto» (2.1) e «ter morrido» (2.2)', () => {
+  test('casos 4.1 da proposta disparam ALTO', () => {
+    for (const note of [
+      'meu pai morreu e eu junto', 'meu pai vai morrer e eu junto',
+      'ela morreu na semana passada e eu junto', 'morreram e eu vou junto',
+      'se ele morrer eu morro tambem', 'morreu. E eu junto.', 'o celular morreu e eu junto',
+      'queria ter morrido'
+    ]) assert.equal(classifyNote(note), 'alto', note);
+  });
+
+  test('casos 4.2 da proposta disparam MÉDIO', () => {
+    for (const note of ['meu amigo morreu e eu tambem', 'ele morreu e vou atras dele',
+      'ela morreu, devia ter sido eu']) {
+      assert.equal(classifyNote(note), 'medio', note);
+    }
+  });
+
+  test('cada palavra de morte com cada expressão ALTO', () => {
+    const deaths = ['morreu', 'morreram', 'morrer', 'morra', 'morrerem', 'faleceu', 'falecer'];
+    const expressions = ['e eu junto', 'eu junto', 'eu vou junto', 'vou junto', 'eu morro junto',
+      'eu morro tambem', 'morro com ele', 'morro com ela', 'levem-me junto', 'leva-me junto', 'quero ir junto'];
+    for (const death of deaths) {
+      for (const expr of expressions) {
+        assert.equal(classifyNote(`se ela ${death} ${expr}`), 'alto', `${death} ${expr}`);
+        assert.equal(classifyNote(`${death} um dia desses ${expr}`), 'alto', `4 palavras: ${death} ${expr}`);
+      }
+    }
+  });
+
+  test('cada expressão MÉDIO', () => {
+    for (const expr of ['e eu tambem', 'vou atras dele', 'vou atras dela', 'vou atras deles',
+      'devia ter sido eu', 'deveria ter sido eu', 'queria ter ido com ele', 'queria ter ido com ela']) {
+      assert.equal(classifyNote(`ele faleceu ontem ${expr}`), 'medio', expr);
+    }
+    // Duas ideias MÉDIO diferentes valem ALTO.
+    assert.equal(classifyNote('ele morreu e vou atras dele. Nao vejo saida'), 'alto');
+  });
+
+  test('expressões de «junto» sem palavra de morte não disparam (casos negados)', () => {
+    for (const note of ['me leva junto no passeio', 'eu vou junto ao cinema', 'e eu junto as fotos',
+      'eu morro tambem de saudade', 'e eu tambem', 'vou atras dele no parque', 'devia ter sido eu a ir',
+      'leva-me junto', 'quero ir junto']) {
+      assert.equal(classifyNote(note), null, note);
+    }
+  });
+
+  test('guardas e limites da regra do «junto» (casos 4.3 e negados)', () => {
+    for (const note of [
+      'meu avo morreu e eu tambem estou triste', 'morreu e eu junto com a familia organizei tudo',
+      'ele morreu e vou junto com o primo ao funeral', 'ele morreu e vou atras dos documentos',
+      'morreu e eu vou junto a missa', 'faleceu e eu junto da familia rezei', 'morreu e eu junto no carro fomos',
+      'ela morreu e eu morro tambem de saudade', 'meu pai morreu', 'o cao morreu',
+      'o celular vai morrer', 'a bateria do celular morreu',
+      'morreu ha muitos anos atras ja e eu junto',
+      'ele morreu e vou atras', 'ele morreu e eu tambem chorei'
+    ]) assert.equal(classifyNote(note), null, note);
+  });
+
+  test('«morar» não é «morrer» (normalização junta os dois erres)', () => {
+    for (const note of ['ele mora em lisboa e eu vou junto', 'meu avo faleceu e eu moro com ela',
+      'a avo morreu, eu moro tambem ali', 'ela mora perto e eu junto as compras']) {
+      assert.equal(classifyNote(note), null, note);
+    }
+    assert.equal(classifyNote('que ele morra e eu junto'), 'alto');
+    assert.equal(classifyNote('ele morreu e eu morro com ele'), 'alto');
+  });
+
+  test('pontuação: 1.ª leitura não atravessa, 2.ª atravessa só para a frase de risco', () => {
+    assert.equal(classifyNote('morreu. E eu junto.'), 'alto');
+    assert.equal(classifyNote('morreu, e eu junto. com ela'), 'alto');
+    assert.equal(classifyNote('meu amigo morreu e eu tambem. Hoje nao treinei'), 'medio');
+  });
+
+  test('«ter morrido» com gatilhos de querer, preferir, dever e «ia»', () => {
+    for (const trigger of ['quero', 'queria', 'so queria', 'quer', 'prefiro', 'preferia', 'melhor',
+      'seria melhor', 'devia', 'devo', 'talvez devesse', 'ia']) {
+      assert.equal(classifyNote(`${trigger} ter morrido`), 'alto', trigger);
+      assert.equal(classifyNote(`${trigger} mesmo ter morrido naquele dia`), 'alto', `${trigger} mesmo`);
+    }
+  });
+
+  test('«ter morrido» sem gatilho ou com exceção não dispara (casos negados)', () => {
+    for (const note of ['queria ter morrido de vergonha', 'devia ter morrido de rir', 'preferia ter morrido de sono',
+      'ele pode ter morrido', 'o peixe deve ter morrido', 'achei que ia ver morrido',
+      'vou ter morrido']) {
+      assert.equal(classifyNote(note), null, note);
+    }
+    assert.equal(classifyNote('queria ter morrido. de vergonha nada'), 'alto');
   });
 });

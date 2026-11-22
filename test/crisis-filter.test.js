@@ -614,7 +614,7 @@ describe('filtro de crise v2.2: «matar-me» sozinho (1.1 a 1.3)', () => {
       'me mato a limpar a casa', 'matei-me a cozinhar', 'mato-me de trabalho', 'me matei de estudo',
       'ele matou-se a correr', 'se mataram de rir', 'eles mataram-se de tanto trabalhar',
       'me matei no jogo', 'mato-me na partida', 'matou-se na final', 'se matou na quadra',
-      'matar-me-ei a estudar', 'devia matar-me a estudar', 'hei de me matar de tanto estudar',
+      'matar-me-ei a estudar', 'hei de me matar de tanto estudar',
       'isso me mata de rir', 'a saudade mata-me'
     ]) assert.equal(classifyNote(note), null, note);
   });
@@ -734,5 +734,60 @@ describe('filtro de crise v2.2: «e eu junto» (2.1) e «ter morrido» (2.2)', (
       assert.equal(classifyNote(note), null, note);
     }
     assert.equal(classifyNote('queria ter morrido. de vergonha nada'), 'alto');
+  });
+});
+
+// Regressão fixa (revisão do PR 23): frases COM gatilho que davam ALTO na v2.1
+// e têm de continuar ALTO. As exceções novas da v2.2 são só das formas sem gatilho.
+const V21_HIGH_WITH_TRIGGER = [
+  'vou me matar a trabalhar', 'quero matar-me a correr', 'quero me matar a limpar', 'vou me matar a rir',
+  'quero me matar na quadra', 'vou me matar na final',
+  'vou matar-me a cozinhar', 'quero me matar de limpar',
+  'ideias de me matar na final', 'quero me matar a serio', 'vou mematar a trabalhar',
+  'vou me matar hoje', 'penso em me matar a noite',
+  'quero me suicidar de tanto trabalhar', 'ele quer se matar a correr', 'vou-me matar no treino',
+  'quero morrer a sério', 'tenho vontade de me matar na quadra'
+];
+
+describe('filtro de crise v2.2: regressão da v2.1 (frases com gatilho)', () => {
+  test('frases com gatilho que eram ALTO continuam ALTO', () => {
+    for (const note of V21_HIGH_WITH_TRIGGER) assert.equal(classifyNote(note), 'alto', note);
+  });
+
+  test('gatilho novo da v2.2 também não ganha as exceções novas', () => {
+    assert.equal(classifyNote('devia matar-me a estudar'), 'alto');
+    assert.equal(classifyNote('mais vale me matar na final'), 'alto');
+  });
+
+  test('a lista de regressão era mesmo ALTO na v2.1 (referência congelada)', () => {
+    const reference = require('../referencia/crisis-filter-tabela-v2.1.js');
+    for (const note of V21_HIGH_WITH_TRIGGER) assert.equal(reference.classifyNote(note), 'alto', note);
+  });
+});
+
+// Comportamento travado pela pesquisadora (respostas ao PR 23). Os marcados
+// «revisar na v2.3» dependem da lista v2.3, do sim do dono e do profissional.
+describe('filtro de crise v2.2: desvios e casos travados', () => {
+  test('desvio 1: «mora» (morar) não é «morra»', () => {
+    assert.equal(classifyNote('mora longe e eu junto'), null);
+  });
+  test('desvio 2: «hoje» com o infinitivo nu', () => {
+    assert.equal(classifyNote('me matar hoje'), 'alto');
+  });
+  test('desvio 3: «suicidar» sem exceção «a/de + verbo»', () => {
+    assert.equal(classifyNote('me suicidar de tanto trabalhar'), 'alto');
+  });
+  test('desvio 4: «ter morrido de saudade» não é exceção', () => {
+    assert.equal(classifyNote('queria ter morrido de saudade'), 'alto');
+  });
+  test('revisar na v2.3 (a): treino/academia depois de «me matei»/«mato-me» dá ALTO', () => {
+    assert.equal(classifyNote('me matei no treino'), 'alto');
+    assert.equal(classifyNote('mato-me na academia'), 'alto');
+  });
+  test('revisar na v2.3 (b): «devia morrer» não dispara', () => {
+    assert.equal(classifyNote('devia morrer'), null);
+  });
+  test('revisar na v2.3 (c): «morreu de rir e eu junto» dá ALTO', () => {
+    assert.equal(classifyNote('ele morreu de rir e eu junto'), 'alto');
   });
 });

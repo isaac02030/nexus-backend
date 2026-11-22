@@ -498,16 +498,40 @@ describe('filtro de crise v2.1: ajustes da lista', () => {
     assert.equal(classifyNote('ele quer muito mesmo agora se matar'), null);
   });
 
-  test('aparelho ou planta + até 2 palavras + morrer/morreu não dispara', () => {
+  test('aparelho ou planta + até 2 palavras neutras + morrer/morreu não dispara', () => {
     for (const note of [
       'o celular vai morrer',
       'a bateria do celular vai morrer hoje',
-      'meu telefone ja vai morrer',
-      'o computador quer morrer',
-      'o notebook vai morrer',
       'minha planta morreu',
-      'as plantas vao morrer'
+      'meu telefone ja vai morrer',
+      'o notebook vai morrer',
+      'a planta morreu hoje',
+      'o celular vai morrer. vou carregar'
     ]) assert.equal(classifyNote(note), null, note);
+  });
+
+  test('palavra fora da lista neutra, no meio ou no trecho, faz a exceção não valer (revisão do PR)', () => {
+    for (const note of [
+      'o celular faz querer morrer',
+      'celular ele quer morrer',
+      'celular - ele quer morrer',
+      'celular – ele quer morrer',
+      'celular — ele quer morrer',
+      'o celular melhor morrer',
+      'o celular vou querer morrer',
+      'celular vai morrer e eu junto',
+      'suicidar-se o celular vai morrer',
+      'o computador quer morrer'
+    ]) assert.equal(classifyNote(note), 'alto', note);
+  });
+
+  test('travessão corta; hífen dentro da palavra não', () => {
+    assert.equal(classifyNote('quero morrer - de rir nada'), 'alto');
+    assert.equal(classifyNote('quero morrer — velho amigo'), 'alto');
+    assert.equal(classifyNote('quero morrer –\nsaudavel'), 'alto');
+    assert.equal(classifyNote('Vou-me matar.'), 'alto');
+    assert.equal(classifyNote('queria matar-me'), 'alto');
+    assert.equal(classifyNote('vou-me matar de rir'), null);
   });
 
   test('a exceção do aparelho não esconde frase de risco', () => {

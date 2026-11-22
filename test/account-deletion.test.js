@@ -14,7 +14,7 @@ process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
 
 const usersRouter = require('../routes/users');
-const { ACCOUNT_DELETION_STEPS } = require('../lib/account-deletion');
+const { ACCOUNT_DELETION_STEPS, TRANSFERRED_MISSION_TITLE } = require('../lib/account-deletion');
 const { resetAllAttempts, MAX_WRONG } = require('../lib/password-attempts');
 
 const app = express();
@@ -313,6 +313,24 @@ describe('excluir a conta: segurança', { concurrency: 1 }, () => {
   });
 });
 
+// Colunas que apontam para users: em CREATE TABLE e em ALTER TABLE ... ADD
+// COLUMN (achado do Argos no PR 26: a guarda só via o CREATE TABLE).
+function userReferenceColumns(sqlText) {
+  const found = [];
+  const clean = sqlText.replace(/--[^\n]*/g, '');
+  for (const [, table, body] of clean.matchAll(/CREATE TABLE(?: IF NOT EXISTS)? (\w+) \(([\s\S]*?)\n\s*\);/g)) {
+    for (const [, column] of body.matchAll(/^\s*(\w+) [^,\n]*REFERENCES users\s*\(id\)/gm)) {
+      found.push({ table, column });
+    }
+  }
+  for (const [, table, body] of clean.matchAll(/ALTER TABLE(?: IF EXISTS)?(?: ONLY)? (\w+)([\s\S]*?);/g)) {
+    for (const [, column] of body.matchAll(/ADD(?: COLUMN)?(?: IF NOT EXISTS)? (\w+) [^,;]*?REFERENCES users\s*\(id\)/g)) {
+      found.push({ table, column });
+    }
+  }
+  return found;
+}
+
 describe('lista de exclusão cobre o banco', () => {
   const migrationsDir = path.join(__dirname, '..', 'migrations');
   const sql = fs.readdirSync(migrationsDir)
@@ -321,20 +339,71 @@ describe('lista de exclusão cobre o banco', () => {
     .join('\n');
   const stepsSql = ACCOUNT_DELETION_STEPS.map(step => normalize(step.sql)).join('\n');
 
-  test('toda tabela com coluna que aponta para users tem um passo na exclusão', () => {
-    const tables = [...sql.matchAll(/CREATE TABLE IF NOT EXISTS (\w+) \(([\s\S]*?)\n\);/g)];
-    assert.ok(tables.length >= 10);
-    for (const [, table, body] of tables) {
-      const userColumns = [...body.matchAll(/^\s*(\w+) INTEGER[^,\n]*REFERENCES users\(id\)/gm)].map(m => m[1]);
-      if (table === 'users') continue;
-      for (const column of userColumns) {
-        const pattern = new RegExp(`(FROM|UPDATE) ${table}\\b[^\\n]*?\\b${column} = \\$1`);
-        assert.ok(pattern.test(stepsSql), `${table}.${column} sem passo na exclusão`);
-      }
+  function covered(table, column) {
+    return new RegExp(`(FROM|UPDATE) ${table}\\b[^\\n]*?\\b${column} = \\$1`).test(stepsSql);
+  }
+
+  test('a guarda vê CREATE TABLE e ALTER TABLE ... ADD COLUMN', () => {
+    const fake = `
+      CREATE TABLE IF NOT EXISTS coisa (
+        id SERIAL PRIMARY KEY,
+        dono_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
+      );
+      ALTER TABLE missions
+        ADD COLUMN IF NOT EXISTS revisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS outra TEXT;
+      ALTER TABLE checkins ADD COLUMN visto_por INTEGER REFERENCES users (id);
+    `;
+    assert.deepEqual(userReferenceColumns(fake), [
+      { table: 'coisa', column: 'dono_id' },
+      { table: 'missions', column: 'revisor_id' },
+      { table: 'checkins', column: 'visto_por' }
+    ]);
+    assert.equal(covered('missions', 'revisor_id'), false);
+  });
+
+  test('toda coluna que aponta para users tem um passo na exclusão', () => {
+    const columns = userReferenceColumns(sql).filter(item => item.table !== 'users');
+    assert.ok(columns.length >= 10);
+    for (const { table, column } of columns) {
+      assert.ok(covered(table, column), `${table}.${column} sem passo na exclusão`);
     }
   });
 
-  test('a conta sai por último e ninguém usa o ON DELETE sozinho', () => {
+  test('a conta sai por último', () => {
     assert.equal(normalize(ACCOUNT_DELETION_STEPS[ACCOUNT_DELETION_STEPS.length - 1].sql), 'DELETE FROM users WHERE id = $1');
+  });
+
+  test('ordem: pares antes da troca de dono; troca de dono antes de apagar registros e missões', () => {
+    const at = name => ACCOUNT_DELETION_STEPS.findIndex(step => step.name === name);
+    const transfer = at('missoes_passadas_ao_parceiro');
+    assert.ok(transfer > 0);
+    assert.ok(at('missao_do_outro_lado_do_par') < at('pares_das_missoes'));
+    assert.ok(at('pares_das_missoes') < transfer);
+    for (const later of ['fusoes_apontando_para_as_missoes', 'checkins', 'mensagens', 'registro_de_avisos', 'missoes', 'conta']) {
+      assert.ok(transfer < at(later), `${later} antes da troca de dono`);
+    }
+  });
+
+  test('troca de dono: contrato de quem saiu vira NULL, título neutro, parceiro zerado, started_at fica', () => {
+    const transfer = normalize(ACCOUNT_DELETION_STEPS.find(step => step.name === 'missoes_passadas_ao_parceiro').sql);
+    for (const field of ['description', 'daily_minimum', 'commitment_window', 'why_it_matters', 'fallback_plan',
+      'study_focus', 'study_current_stage', 'study_target_outcome', 'partner_id', 'partner_contact',
+      'partner_started_at', 'pair_started_at', 'match_preference']) {
+      assert.match(transfer, new RegExp(`\\b${field} = NULL`), field);
+    }
+    assert.match(transfer, /user_id = partner_id/);
+    assert.match(transfer, /user_score = partner_score/);
+    assert.match(transfer, /user_contact = partner_contact/);
+    assert.match(transfer, /mode = 'solo'/);
+    assert.ok(transfer.includes(`title = '${TRANSFERRED_MISSION_TITLE}'`));
+    assert.doesNotMatch(transfer, /started_at = (?!NULL)/);
+    assert.match(transfer, /WHERE user_id = \$1 AND partner_id IS NOT NULL/);
+  });
+
+  test('o outro lado do par só muda em par ativo', () => {
+    const other = normalize(ACCOUNT_DELETION_STEPS.find(step => step.name === 'missao_do_outro_lado_do_par').sql);
+    assert.match(other, /mm\.status = 'active'/);
+    assert.match(other, /mode = 'solo'/);
   });
 });

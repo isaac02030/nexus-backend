@@ -12,6 +12,14 @@ const { checkAdult } = require('../lib/adult-age');
 const { deleteAccountData } = require('../lib/account-deletion');
 const { isAdmin } = require('../lib/admin');
 const { lockedForSeconds, recordWrong, clearAttempts } = require('../lib/password-attempts');
+const {
+  NOTE_CONSENT_VERSION,
+  NOTE_CONSENT_LOAD_ERROR,
+  NOTE_CONSENT_SAVE_ERROR,
+  NOTE_CONSENT_BODY_ERROR,
+  consentSelectSql,
+  consentPayload
+} = require('../lib/note-consent');
 const router   = express.Router();
 
 const REGISTER_UNAVAILABLE_MESSAGE = 'O cadastro não está disponível agora. Tente de novo mais tarde.';
@@ -208,6 +216,102 @@ router.put('/me/reminder', auth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao guardar o lembrete.' });
+  }
+});
+
+// ============================================
+// CONSENTIMENTO PARA GUARDAR A NOTA DO CHECK-IN (lib/note-consent.js)
+// GET    /api/users/me/note-consent  → a escolha atual
+// POST   /api/users/me/note-consent  → dar o consentimento
+//        Body: { consent: true } (ação afirmativa; nada mais vale como sim)
+// DELETE /api/users/me/note-consent  → «Não guardar» ou retirar: grava
+//        "não" com a hora do servidor e apaga as notas já guardadas da
+//        pessoa (o registro dos dias continua). Vale também para o primeiro
+//        «Não guardar», para a pergunta não voltar.
+// Resposta: { note_consent: "yes" | "no" | null, decided_at, version }
+// (null = ainda não respondeu, vale como "não"). A data vem do servidor.
+// Antes da migração 007: GET responde null; POST e DELETE respondem 503
+// calmo, sem gravar nada (e o check-in já não guarda nota sem o sim).
+// Nada do pedido vai para log.
+// ============================================
+router.get('/me/note-consent', auth, async (req, res) => {
+  try {
+    const result = await db.query(consentSelectSql(), [req.user.userId]);
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Utilizador nao encontrado.' });
+    }
+    return res.json(consentPayload(result.rows[0]));
+  } catch (err) {
+    return res.status(500).json({ error: NOTE_CONSENT_LOAD_ERROR });
+  }
+});
+
+router.post('/me/note-consent', auth, async (req, res) => {
+  if (!req.body || req.body.consent !== true) {
+    return res.status(400).json({ error: NOTE_CONSENT_BODY_ERROR, code: 'consent_required' });
+  }
+  try {
+    const result = await db.query(
+      `UPDATE users
+       SET note_consent = TRUE, note_consent_at = NOW(), note_consent_version = $2
+       WHERE id = $1
+       RETURNING note_consent::text AS choice, note_consent_at AS decided_at,
+                 note_consent_version AS version`,
+      [req.user.userId, NOTE_CONSENT_VERSION]
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Utilizador nao encontrado.' });
+    }
+    return res.json(consentPayload(result.rows[0]));
+  } catch (err) {
+    if (err && err.code === '42703') {
+      return res.status(503).json({ error: NOTE_CONSENT_SAVE_ERROR, code: 'consent_unavailable' });
+    }
+    return res.status(500).json({ error: NOTE_CONSENT_SAVE_ERROR });
+  }
+});
+
+router.delete('/me/note-consent', auth, async (req, res) => {
+  let client;
+  try {
+    client = await db.connect();
+    await client.query('BEGIN');
+    // O UPDATE trava a linha da pessoa. O check-in trava a mesma linha
+    // (FOR SHARE) antes de ler a escolha: ou ele termina antes (e a nota
+    // dele é apagada abaixo), ou espera e já lê o "não".
+    const result = await client.query(
+      `UPDATE users
+       SET note_consent = FALSE, note_consent_at = NOW(), note_consent_version = $2
+       WHERE id = $1
+       RETURNING note_consent::text AS choice, note_consent_at AS decided_at,
+                 note_consent_version AS version`,
+      [req.user.userId, NOTE_CONSENT_VERSION]
+    );
+    if (!result.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Utilizador nao encontrado.' });
+    }
+    // Só as notas DESTA pessoa (as do parceiro no Duo ficam).
+    const cleared = await client.query(
+      `UPDATE checkins SET note = NULL
+       WHERE user_id = $1 AND note IS NOT NULL`,
+      [req.user.userId]
+    );
+    await client.query('COMMIT');
+    return res.json({
+      ...consentPayload(result.rows[0]),
+      notes_deleted: cleared && typeof cleared.rowCount === 'number' ? cleared.rowCount : 0
+    });
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
+    }
+    if (err && err.code === '42703') {
+      return res.status(503).json({ error: NOTE_CONSENT_SAVE_ERROR, code: 'consent_unavailable' });
+    }
+    return res.status(500).json({ error: NOTE_CONSENT_SAVE_ERROR });
+  } finally {
+    if (client) client.release();
   }
 });
 

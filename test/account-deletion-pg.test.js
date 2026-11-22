@@ -36,7 +36,8 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
   await admin.query('DROP SCHEMA IF EXISTS public CASCADE');
   await admin.query('CREATE SCHEMA public');
   for (const f of ['001_initial_schema.sql', '002_user_reminder.sql', '003_checkin_difficult_day.sql',
-    '004_mission_weekdays.sql', '005_community_post_reports.sql', '006_user_adult_confirmation.sql']) {
+    '004_mission_weekdays.sql', '005_community_post_reports.sql', '006_user_adult_confirmation.sql',
+    '007_user_note_consent.sql']) {
     psqlFile(path.join(repoRoot, 'migrations', f));
   }
   psqlFile(path.join(repoRoot, 'scripts', 'sql', 'papel-do-app.sql'));

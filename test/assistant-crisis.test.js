@@ -239,6 +239,27 @@ describe('assistente: filtro de crise e erro sem eco', { concurrency: 1 }, () =>
     assert.match(loggedText(), /openai_network_error/);
   });
 
+  test('health do admin com erro da OpenAI: código fixo, sem a mensagem do provedor', async () => {
+    providerReply = { status: 400, raw: JSON.stringify({ error: { message: PROVIDER_SECRET_TEXT } }) };
+    const response = await fetch(`${baseUrl}/api/assistant/health?live=1`, {
+      headers: { Authorization: `Bearer ${tokenFor(1)}` }
+    });
+    const raw = await response.text();
+    assert.equal(response.status, 500);
+    assert.equal(JSON.parse(raw).error, 'openai_unavailable');
+    assert.equal(raw.includes(PROVIDER_SECRET_TEXT), false);
+    assert.equal(loggedText().includes(PROVIDER_SECRET_TEXT), false);
+    assert.match(loggedText(), /openai_http_error/);
+  });
+
+  test('health: quem não é admin recebe 403 e nada vai à OpenAI', async () => {
+    const response = await fetch(`${baseUrl}/api/assistant/health?live=1`, {
+      headers: { Authorization: `Bearer ${tokenFor(2)}` }
+    });
+    assert.equal(response.status, 403);
+    assert.equal(sent.length, 0);
+  });
+
   test('erro do banco: 500 sem details e sem a mensagem do erro no log', async () => {
     state.dbFails = true;
     const res = await ask('o que faco hoje?');

@@ -284,12 +284,15 @@ router.get('/health', auth, async (req, res) => {
     const payload = await buildHealthPayload(live);
     res.json(payload);
   } catch (err) {
+    // Código fixo, como em /mission: a mensagem do provedor não volta.
+    const code = err && err.code && String(err.code).startsWith('openai_') ? err.code : 'openai_failed';
+    console.error('Assistant health error:', code, err && err.status ? err.status : '');
     res.status(500).json({
       configured: Boolean(process.env.OPENAI_API_KEY),
       model_requested: (process.env.OPENAI_MODEL || '').trim() || null,
       model_resolved: resolveAssistantModel(),
       live: true,
-      error: err.message
+      error: 'openai_unavailable'
     });
   }
 });

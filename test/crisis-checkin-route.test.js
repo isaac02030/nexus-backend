@@ -185,6 +185,19 @@ describe('filtro de crise na rota de check-in', { concurrency: 1 }, () => {
     assert.deepEqual(logged, []);
   });
 
+  test('v2 (gatilho + alvo): nota não é gravada nem vai para log', async () => {
+    const res = await post({ mission_id: 10, note: 'o dia de hoje me fez querer me matar' });
+
+    assert.equal(res.status, 201);
+    assert.equal(res.body.crisis, true);
+    assert.equal(res.body.crisis_level, 'alto');
+    assert.equal(res.body.checkin.note, null);
+    assert.equal(db.checkins[0].note, null);
+    assertNowhere('matar');
+    assertNowhere('fez querer');
+    assert.deepEqual(logged, []);
+  });
+
   test('MÉDIO em dia difícil: conta como dia difícil, sem guardar a nota', async () => {
     const res = await post({ mission_id: 10, difficult: true, minimum_done: true, note: 'nao vejo saida' });
 

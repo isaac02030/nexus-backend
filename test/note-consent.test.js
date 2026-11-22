@@ -379,6 +379,33 @@ describe('consentimento da nota do check-in', { concurrency: 1 }, () => {
     assertNowhere(NOTA);
   });
 
+  test('nota antiga no dia, sem consentimento, check-in de novo: a nota do dia vira NULL', async () => {
+    seedNote(1, 10, 3, 'nota antiga do dia');
+    const res = await checkin({ mission_id: 10, note: NOTA });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.already_done, true);
+    assert.equal(res.body.note_saved, false);
+    assert.equal(res.body.checkin.note, null);
+    assert.deepEqual(storedNotes(1), [null]);
+
+    // Também sem frase nova (ex.: dia difícil sem frase) e com "não" gravado.
+    seedNote(1, 11, 1, 'outra nota antiga');
+    await consent.withdraw();
+    db.checkins.find((row) => row.mission_id === 11).note = 'outra nota antiga';
+    const again = await checkin({ mission_id: 11, note: 'estudei a regra de tres hoje' });
+    assert.equal(again.status, 201);
+    assert.ok(storedNotes(1).every((note) => note === null));
+  });
+
+  test('com consentimento e sem frase nova: a nota do dia fica (como antes)', async () => {
+    await consent.give();
+    seedNote(1, 10, 3, 'nota guardada com o sim');
+    const res = await checkin({ mission_id: 10, difficult: true, minimum_done: true });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.note_saved, false);
+    assert.deepEqual(storedNotes(1), ['nota guardada com o sim']);
+  });
+
   test('com consentimento: a nota é gravada e note_saved true', async () => {
     await consent.give();
     const res = await checkin({ mission_id: 10, note: NOTA });

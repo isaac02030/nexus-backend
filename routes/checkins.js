@@ -378,6 +378,10 @@ async function recordCheckin({ mission, userId, note, wantsDifficult, clearNote 
     // (e apaga a nota dele) ou termina antes (e aqui já se lê o "não").
     const keepNote = await notesAllowed(client, userId, { lock: 'share' });
     const storedNote = keepNote && !clearNote && note ? note : null;
+    // Sem o "sim", a nota que já existia no dia também é apagada (achado do
+    // Argos no PR 27): nenhuma nota fica guardada sem consentimento.
+    // Com o "sim", sem frase nova a nota do dia fica (como antes).
+    const wipeNote = clearNote === true || !keepNote;
 
     // mission_weekdays via to_jsonb: devolve NULL (todos os dias) enquanto a
     // migração 004 não estiver aplicada, em vez de quebrar a consulta.
@@ -452,7 +456,7 @@ async function recordCheckin({ mission, userId, note, wantsDifficult, clearNote 
                      note = CASE WHEN $6 THEN NULL ELSE COALESCE($4, checkins.note) END,
                      is_difficult = checkins.is_difficult OR EXCLUDED.is_difficult
        RETURNING *`,
-      [mission.id, userId, dayNumber, storedNote, wantsDifficult, clearNote === true]
+      [mission.id, userId, dayNumber, storedNote, wantsDifficult, wipeNote]
     );
 
     if (!alreadyDone) {

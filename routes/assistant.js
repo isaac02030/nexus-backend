@@ -2,9 +2,47 @@ const express = require('express');
 const https = require('https');
 const { db } = require('../lib/db');
 const auth = require('../middleware/auth');
+const { classifyNote } = require('../lib/crisis-filter');
 
 const router = express.Router();
 const DEFAULT_ASSISTANT_MODEL = 'gpt-4o-mini';
+
+// Filtro de crise antes da IA (decisão de 22/11): a pergunta e os campos
+// livres da missão que entram no prompt passam pelo mesmo classificador das
+// notas. Com alerta, nada vai à OpenAI e a resposta leva crisis + crisis_level.
+const ASSISTANT_CRISIS_MESSAGE = 'Sua pergunta não foi enviada ao assistente. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const MISSION_FREE_TEXT_FIELDS = [
+  'title',
+  'daily_minimum',
+  'commitment_window',
+  'why_it_matters',
+  'fallback_plan',
+  'study_focus',
+  'study_current_stage',
+  'study_target_outcome'
+];
+const CRISIS_RANK = { alto: 2, medio: 1 };
+
+function assistantCrisisLevel(mission, question) {
+  const texts = [question, ...MISSION_FREE_TEXT_FIELDS.map(field => mission[field])];
+  let level = null;
+  for (const text of texts) {
+    if (typeof text !== 'string') continue;
+    const found = classifyNote(text);
+    if ((CRISIS_RANK[found] || 0) > (CRISIS_RANK[level] || 0)) level = found;
+    if (level === 'alto') break;
+  }
+  return level;
+}
+
+// O erro do provedor não volta ao cliente nem vai ao log com texto: a
+// mensagem dele pode repetir parte do pedido ou da resposta da IA.
+function openAiError(code, status) {
+  const err = new Error(code);
+  err.code = code;
+  if (status) err.status = status;
+  return err;
+}
 
 function resolveAssistantModel() {
   const rawModel = (process.env.OPENAI_MODEL || '').trim();
@@ -188,25 +226,27 @@ function callOpenAI(prompt) {
         try {
           const json = JSON.parse(raw || '{}');
           if (res.statusCode < 200 || res.statusCode >= 300) {
-            return reject(new Error(json.error?.message || 'Falha na OpenAI.'));
+            return reject(openAiError('openai_http_error', res.statusCode));
           }
 
           const text = extractResponseText(json);
           if (!text) {
-            return reject(new Error('A OpenAI nao devolveu texto.'));
+            return reject(openAiError('openai_empty_answer'));
           }
 
           resolve({ text, model });
         } catch (err) {
-          reject(err);
+          reject(openAiError('openai_bad_response'));
         }
       });
     });
 
     req.setTimeout(20000, () => {
-      req.destroy(new Error('Timeout ao chamar a OpenAI.'));
+      req.destroy(openAiError('openai_timeout'));
     });
-    req.on('error', reject);
+    req.on('error', err => reject(err && err.code === 'openai_timeout'
+      ? err
+      : openAiError('openai_network_error')));
     req.write(body);
     req.end();
   });
@@ -291,6 +331,21 @@ router.post('/mission', auth, async (req, res) => {
       [missionId, userId]
     );
 
+    // Antes de tudo (com ou sem chave): com alerta, nada sai do servidor,
+    // nada vai para log e não há resposta de treino.
+    const crisisLevel = assistantCrisisLevel(mission, question);
+    if (crisisLevel) {
+      return res.json({
+        answer: ASSISTANT_CRISIS_MESSAGE,
+        message: ASSISTANT_CRISIS_MESSAGE,
+        source: 'crisis',
+        model: null,
+        fallback_reason: null,
+        crisis: true,
+        crisis_level: crisisLevel
+      });
+    }
+
     const prompt = buildMissionContext(mission, question);
 
     if (!process.env.OPENAI_API_KEY) {
@@ -311,23 +366,27 @@ router.post('/mission', auth, async (req, res) => {
         fallback_reason: null
       });
     } catch (openAiErr) {
-      console.error('Assistant OpenAI error:', openAiErr.message);
+      const code = openAiErr && openAiErr.code && String(openAiErr.code).startsWith('openai_')
+        ? openAiErr.code
+        : 'openai_failed';
+      console.error('Assistant OpenAI error:', code, openAiErr && openAiErr.status ? openAiErr.status : '');
       return res.json({
         answer: buildLocalAssistantFallback(mission, checkinsRes.rows, question),
         source: 'fallback',
         model: null,
-        fallback_reason: openAiErr.message
+        fallback_reason: 'openai_unavailable'
       });
     }
   } catch (err) {
-    console.error('Assistant error:', err.message);
+    // Só o tipo do erro no log; nada do pedido nem da mensagem do banco.
+    console.error('Assistant error:', (err && (err.code || err.name)) || 'unknown');
     res.status(500).json({
       error: 'assistant_failed',
-      message: 'Nao foi possivel gerar resposta agora.',
-      details: err.message
+      message: 'Nao foi possivel gerar resposta agora.'
     });
   }
 });
 
 module.exports = router;
 module.exports.buildMissionContext = buildMissionContext;
+module.exports.assistantCrisisLevel = assistantCrisisLevel;

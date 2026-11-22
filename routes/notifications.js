@@ -9,6 +9,9 @@
 // O envio e so push: nao grava mensagem e nao conta no limite de chat.
 // Dia livre (fora dos dias da missao escolhidos no contrato): nenhum
 // lembrete, nem o principal nem os extras, na data local da pessoa.
+// Escolhas de avisos (lib/notification-preferences.js, migração 009): todo
+// push daqui é "lembrete da missão" e só sai para quem tem lembretes = sim.
+// Novidades só saem pelo notify-all, para quem tem novidades = sim.
 // ============================================
 
 const express = require('express');
@@ -25,6 +28,7 @@ const {
   resolveReminderSettings
 } = require('../lib/reminder-schedule');
 const { missionDayChecker, startWeekdayFor } = require('../lib/mission-days');
+const { allowedSqlFor, remindersAllowedSql } = require('../lib/notification-preferences');
 
 const router = express.Router();
 
@@ -67,10 +71,19 @@ router.post('/subscribe', auth, async (req, res) => {
   }
 });
 
-async function sendNotification(userId, title, body, url = '/nexus/nexus-dashboard.html') {
+// kind: 'mission' (lembretes da missão, o padrão) ou 'news' (novidades).
+// O banco só devolve as inscrições se a pessoa escolheu receber esse tipo:
+// sem o sim, nada sai. Devolve quantos envios foram tentados.
+async function sendNotification(userId, title, body, url = '/nexus/nexus-dashboard.html', { kind = 'mission' } = {}) {
+  const allowed = allowedSqlFor(kind, 'u');
+  let attempted = 0;
   try {
     const result = await db.query(
-      'SELECT * FROM push_subscriptions WHERE user_id = $1',
+      `SELECT ps.endpoint, ps.p256dh, ps.auth
+       FROM push_subscriptions ps
+       JOIN users u ON u.id = ps.user_id
+       WHERE ps.user_id = $1
+         AND ${allowed}`,
       [userId]
     );
 
@@ -83,6 +96,7 @@ async function sendNotification(userId, title, body, url = '/nexus/nexus-dashboa
       };
 
       try {
+        attempted += 1;
         await webpush.sendNotification(subscription, payload);
       } catch (err) {
         if (err.statusCode === 410) {
@@ -91,8 +105,9 @@ async function sendNotification(userId, title, body, url = '/nexus/nexus-dashboa
       }
     }
   } catch (err) {
-    console.error('Erro ao enviar notificacao:', err);
+    console.error('Erro ao enviar notificacao:', (err && (err.code || err.name)) || 'unknown');
   }
+  return attempted;
 }
 
 function buildCheckinNotification(mission, actorName) {
@@ -278,8 +293,10 @@ async function runReminderSweep(now = new Date()) {
         m.partner_id,
         to_char(u1.reminder_time, 'HH24:MI') AS user_reminder_time,
         u1.timezone AS user_timezone,
+        ${remindersAllowedSql('u1')} AS user_reminders_on,
         to_char(u2.reminder_time, 'HH24:MI') AS partner_reminder_time,
-        u2.timezone AS partner_timezone
+        u2.timezone AS partner_timezone,
+        ${remindersAllowedSql('u2')} AS partner_reminders_on
       FROM missions m
       JOIN users u1 ON u1.id = m.user_id
       LEFT JOIN users u2 ON u2.id = m.partner_id
@@ -287,13 +304,15 @@ async function runReminderSweep(now = new Date()) {
     `);
 
     for (const mission of missionsRes.rows) {
+      // Só quem tem lembretes = sim (antes da 009: como antes). Quem não
+      // quer lembrete nem é avaliado: nada é enviado nem marcado como enviado.
       const participants = [
-        {
+        mission.user_reminders_on === true ? {
           id: mission.user_id,
           reminderTime: mission.user_reminder_time,
           timezone: mission.user_timezone
-        },
-        mission.partner_id ? {
+        } : null,
+        mission.partner_id && mission.partner_reminders_on === true ? {
           id: mission.partner_id,
           reminderTime: mission.partner_reminder_time,
           timezone: mission.partner_timezone

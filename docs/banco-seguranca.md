@@ -64,7 +64,7 @@ O usuário das migrações precisa poder criar papéis (CREATEROLE). O usuário 
 
 ### Passo a passo (banco novo)
 
-1. Com o endereço do usuário das migrações, rode as migrações em ordem (`001` a `008`).
+1. Com o endereço do usuário das migrações, rode as migrações em ordem (`001` a `009`).
 2. Rode o script do papel do app:
 
    ```bash

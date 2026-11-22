@@ -15,16 +15,22 @@ let queries = 0;
 let server;
 let baseUrl;
 
+// Corpo com o texto de uma novidade (a rota agora só manda novidades).
+const NEWS = JSON.stringify({ title: 'Novidade de teste', body: 'Texto de teste.' });
+
 function request(headers = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL('/api/vertice/notify-all', baseUrl);
-    const req = http.request(url, { method: 'POST', headers }, res => {
+    const req = http.request(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers }
+    }, res => {
       let data = '';
       res.on('data', c => { data += c; });
       res.on('end', () => resolve({ status: res.statusCode, body: data ? JSON.parse(data) : null }));
     });
     req.on('error', reject);
-    req.end();
+    req.end(NEWS);
   });
 }
 

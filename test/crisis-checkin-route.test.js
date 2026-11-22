@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
 const { withAuthDb } = require('./helpers/auth-db');
+const { NOTE_CONSENT_SQL, consentRows } = require('./helpers/note-consent-db');
 
 process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
@@ -58,6 +59,7 @@ function handle(sql, params = []) {
   }
 
   if (/^UPDATE/i.test(text)) return { rows: [], rowCount: 1 };
+  if (NOTE_CONSENT_SQL.test(text)) return consentRows(true);
   if (/FROM users/i.test(text)) return { rows: [{ reminder_time: null, timezone: null }] };
   if (/FROM mission_matches/i.test(text)) return { rows: [] };
 

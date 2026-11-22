@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
 const { withAuthDb } = require('./helpers/auth-db');
+const { NOTE_CONSENT_SQL, consentRows } = require('./helpers/note-consent-db');
 const {
   DIFFICULT_CONSECUTIVE_MESSAGE,
   DIFFICULT_LIMIT_MESSAGE,
@@ -217,6 +218,7 @@ function createSimulator() {
 
     if (!/^SELECT/i.test(text)) return { rows: [], rowCount: 0 };
 
+    if (NOTE_CONSENT_SQL.test(text)) return consentRows(true);
     if (/FROM users/i.test(text) && /reminder_time/i.test(text)) {
       const user = state.users.get(Number(params[0]));
       if (!user) return { rows: [], rowCount: 0 };

@@ -23,6 +23,7 @@ const {
 } = require('../lib/mission-days');
 const { classifyNote } = require('../lib/crisis-filter');
 const { validateNoteLimit } = require('../lib/note-limit');
+const { notesAllowed } = require('../lib/note-consent');
 const {
   getLegacyMissionDayNumber,
   getMissionDayNumber,
@@ -154,6 +155,8 @@ router.post('/', auth, async (req, res) => {
   // Filtro de crise antes de tudo. Se dispara, a nota é descartada aqui:
   // não vai para o banco, nem para log, nem para a IA (que lê do banco).
   // O check-in segue sem penalidade e sem exigir a prova escrita.
+  // Roda com ou sem consentimento para guardar a nota (o texto recebido é
+  // lido sempre; guardar é outra coisa, decidida em recordCheckin).
   const crisisLevel = classifyNote(req.body.note);
   const note = crisisLevel ? null : req.body.note;
   const reply = (status, body) => res.status(status).json({ ...body, ...crisisFields(crisisLevel) });
@@ -201,6 +204,8 @@ router.post('/', auth, async (req, res) => {
     // Comum e difícil usam a mesma transação e a mesma trava da missão.
     // O dia é calculado depois da trava, para dois pedidos não somarem
     // o ponto duas vezes nem passarem de 4 ou de 2 seguidos.
+    // A nota (já validada acima: tamanho, prova) só é GRAVADA com o
+    // consentimento da pessoa, lido no servidor dentro da transação.
     const recorded = await recordCheckin({
       mission, userId, note, wantsDifficult, clearNote: Boolean(crisisLevel)
     });
@@ -359,10 +364,24 @@ function checkinMessage(dayNumber, alreadyDone) {
 // difícil sem frase não apaga nada). Se o filtro de crise disparou
 // (clearNote), a nota do dia é apagada, como no PR 12: nada de crise é
 // gravado e nenhuma nota antiga volta a aparecer ao lado de um pedido de ajuda.
+// Consentimento da nota (migração 007, lib/note-consent.js): sem o "sim"
+// da pessoa, a nota não é gravada (NULL) e o check-in segue igual.
 async function recordCheckin({ mission, userId, note, wantsDifficult, clearNote }) {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+
+    // Primeiro a linha da pessoa (FOR SHARE), depois a missão: a mesma
+    // ordem da exclusão de conta e da retirada do consentimento (que travam
+    // users antes de tudo), para não haver espera cruzada. Com a linha
+    // travada, uma retirada ao mesmo tempo espera este check-in terminar
+    // (e apaga a nota dele) ou termina antes (e aqui já se lê o "não").
+    const keepNote = await notesAllowed(client, userId, { lock: 'share' });
+    const storedNote = keepNote && !clearNote && note ? note : null;
+    // Sem o "sim", a nota que já existia no dia também é apagada (achado do
+    // Argos no PR 27): nenhuma nota fica guardada sem consentimento.
+    // Com o "sim", sem frase nova a nota do dia fica (como antes).
+    const wipeNote = clearNote === true || !keepNote;
 
     // mission_weekdays via to_jsonb: devolve NULL (todos os dias) enquanto a
     // migração 004 não estiver aplicada, em vez de quebrar a consulta.
@@ -437,7 +456,7 @@ async function recordCheckin({ mission, userId, note, wantsDifficult, clearNote 
                      note = CASE WHEN $6 THEN NULL ELSE COALESCE($4, checkins.note) END,
                      is_difficult = checkins.is_difficult OR EXCLUDED.is_difficult
        RETURNING *`,
-      [mission.id, userId, dayNumber, note || null, wantsDifficult, clearNote === true]
+      [mission.id, userId, dayNumber, storedNote, wantsDifficult, wipeNote]
     );
 
     if (!alreadyDone) {
@@ -452,6 +471,8 @@ async function recordCheckin({ mission, userId, note, wantsDifficult, clearNote 
         checkin: withDifficultFlag(checkinRes.rows[0]),
         day: dayNumber,
         already_done: alreadyDone,
+        // Para o site: a nota DESTE pedido foi guardada? (só com o "sim")
+        note_saved: storedNote !== null,
         message: checkinMessage(dayNumber, alreadyDone)
       }
     };

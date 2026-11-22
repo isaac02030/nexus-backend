@@ -208,6 +208,13 @@ describe('aceite dos termos e da privacidade', { concurrency: 1 }, () => {
   });
 
   // ---------- cadastro ----------
+  test('versão antiga: o texto é o mesmo do site (revisão da Clara, PR 23 do site)', () => {
+    assert.equal(LEGAL_VERSION_OUTDATED_MESSAGE,
+      'Os termos ou a política de privacidade mudaram. Atualize a página (ou feche e abra o app) para ver a versão atual e aceite de novo.');
+    // Negado: o texto antigo, que pedia para recarregar, não volta.
+    assert.doesNotMatch(LEGAL_VERSION_OUTDATED_MESSAGE, /Recarregue/);
+  });
+
   test('versão atual é «beta-1» para os dois textos', () => {
     assert.equal(CURRENT_TERMS_VERSION, 'beta-1');
     assert.equal(CURRENT_PRIVACY_VERSION, 'beta-1');

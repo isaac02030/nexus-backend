@@ -82,7 +82,16 @@ async function request(method, path, { token, body } = {}) {
 }
 
 function register(birthDate, extra = {}) {
-  const body = { username: 'pessoa_teste', email: 'pessoa@exemplo.test', password: 'senha-de-teste', ...extra };
+  // Aceite da versão atual (migração 008); os casos sem aceite ficam em
+  // test/legal-acceptance.test.js.
+  const body = {
+    username: 'pessoa_teste',
+    email: 'pessoa@exemplo.test',
+    password: 'senha-de-teste',
+    terms_version: 'beta-1',
+    privacy_version: 'beta-1',
+    ...extra
+  };
   if (birthDate !== undefined) body.birth_date = birthDate;
   return request('POST', '/api/users/register', { body });
 }
@@ -163,7 +172,8 @@ describe('cadastro com idade', { concurrency: 1 }, () => {
     const insert = db.queries.find((q) => /^INSERT INTO users/i.test(q.text));
     assert.match(insert.text, /adult_confirmed_at/);
     assert.match(insert.text, /NOW\(\)/);
-    assert.equal(insert.params.length, 3, 'só usuário, e-mail e hash');
+    assert.equal(insert.params.length, 5, 'só usuário, e-mail, hash e as duas versões aceitas');
+    assert.deepEqual(insert.params.slice(3), ['beta-1', 'beta-1']);
     assert.equal(birthReachedDb(birth), false, 'a data de nascimento não chega ao banco');
     assert.equal(JSON.stringify(res.body).includes(birth), false);
     assert.equal(consoleCalls.length, 0);

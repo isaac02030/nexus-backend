@@ -20,6 +20,13 @@ const {
   consentSelectSql,
   consentPayload
 } = require('../lib/note-consent');
+const {
+  LEGAL_SAVE_ERROR_MESSAGE,
+  LEGAL_SELECT,
+  checkAcceptance,
+  errorBody: legalErrorBody,
+  legalStatus
+} = require('../lib/legal-acceptance');
 const router   = express.Router();
 
 const REGISTER_UNAVAILABLE_MESSAGE = 'O cadastro não está disponível agora. Tente de novo mais tarde.';
@@ -27,7 +34,13 @@ const REGISTER_UNAVAILABLE_MESSAGE = 'O cadastro não está disponível agora. T
 // ============================================
 // REGISTO
 // POST /api/users/register
-// Body: { username, email, password, birth_date: "AAAA-MM-DD" }
+// Body: { username, email, password, birth_date: "AAAA-MM-DD",
+//         terms_version, privacy_version }
+//
+// Aceite obrigatório (lib/legal-acceptance.js): as duas versões têm de ser
+// as atuais do servidor. Sem aceite ou versão antiga: 400 e nada é criado.
+// O banco guarda a versão e a hora do servidor (migração 008). Sem a 008,
+// o INSERT falha (42703) e o cadastro responde 503 calmo, sem criar conta.
 //
 // Só maiores de 18. A data de nascimento serve só para conferir a idade:
 // não é gravada nem logada. O banco guarda só adult_confirmed_at (a hora
@@ -52,6 +65,11 @@ router.post('/register', async (req, res) => {
     });
   }
 
+  const acceptance = checkAcceptance(req.body);
+  if (!acceptance.ok) {
+    return res.status(acceptance.status).json(legalErrorBody(acceptance));
+  }
+
   try {
     // Encriptar a password (nunca guardamos em texto simples)
     const hash = await bcrypt.hash(password, 10);
@@ -59,15 +77,24 @@ router.post('/register', async (req, res) => {
     // Precisa da migração 006 (users.adult_confirmed_at). Sem ela, o
     // cadastro não abre (503 calmo): não criamos conta sem guardar a
     // confirmação de idade.
+    // E da 008 (aceite): sem ela, também 503, sem criar conta.
     const result = await db.query(
-      `INSERT INTO users (username, email, password, adult_confirmed_at)
-       VALUES ($1, $2, $3, NOW())
+      `INSERT INTO users (username, email, password, adult_confirmed_at,
+                          terms_version, terms_accepted_at,
+                          privacy_version, privacy_accepted_at)
+       VALUES ($1, $2, $3, NOW(), $4, NOW(), $5, NOW())
        RETURNING id, username, email, bio, avatar_url, created_at, updated_at,
-                 adult_confirmed_at IS NOT NULL AS adult_confirmed`,
-      [username, email, hash]
+                 adult_confirmed_at IS NOT NULL AS adult_confirmed,
+                 terms_version, terms_accepted_at, privacy_version, privacy_accepted_at`,
+      [username, email, hash, acceptance.terms, acceptance.privacy]
     );
 
-    const user = result.rows[0];
+    const row = result.rows[0];
+    const {
+      terms_version: _tv, terms_accepted_at: _ta, privacy_version: _pv, privacy_accepted_at: _pa,
+      ...user
+    } = row;
+    user.legal = legalStatus(row);
 
     // Criar token JWT — é como um "cartão de identificação" digital
     const token = jwt.sign(
@@ -129,7 +156,9 @@ router.post('/login', async (req, res) => {
     );
 
     // Devolver utilizador (sem a password) + token
+    // legal.needs_acceptance: o site mostra a tela de reaceitação.
     const { password: _, ...userSafe } = user;
+    userSafe.legal = legalStatus(user);
     res.json({ user: userSafe, token });
 
   } catch (err) {
@@ -150,17 +179,25 @@ router.get('/me', auth, async (req, res) => {
       // adult_confirmed: false para contas antigas (de antes da idade no
       // cadastro) e também antes da migração 006 (to_jsonb não quebra).
       `SELECT id, username, email, bio, avatar_url, created_at, updated_at,
-              (to_jsonb(users) ->> 'adult_confirmed_at') IS NOT NULL AS adult_confirmed
+              (to_jsonb(users) ->> 'adult_confirmed_at') IS NOT NULL AS adult_confirmed,
+              ${LEGAL_SELECT}
        FROM users
        WHERE id = $1`,
       [req.user.userId]
     );
 
-    const user = result.rows[0];
-    if (!user) {
+    const row = result.rows[0];
+    if (!row) {
       return res.status(404).json({ error: 'Utilizador nao encontrado.' });
     }
 
+    // legal.needs_acceptance: true quando falta o aceite da versão atual
+    // (conta antiga, versão nova ou antes da migração 008).
+    const {
+      terms_version: _tv, terms_accepted_at: _ta, privacy_version: _pv, privacy_accepted_at: _pa,
+      ...user
+    } = row;
+    user.legal = legalStatus(row);
     res.json({ user });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao carregar sessao.' });
@@ -216,6 +253,43 @@ router.put('/me/reminder', auth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao guardar o lembrete.' });
+  }
+});
+
+// ============================================
+// ACEITAR DE NOVO OS TERMOS E A PRIVACIDADE
+// POST /api/users/me/legal-acceptance
+// Body: { terms_version, privacy_version } (as versões que a tela mostrou)
+//
+// Para contas sem registro de aceite ou quando a versão atual mudou
+// (user.legal.needs_acceptance no /me e no login). Só a versão atual vale;
+// versão antiga ou vazia: 400 e nada muda. Grava a hora do servidor.
+// A pessoa é sempre a do token. Antes da migração 008: 503 calmo.
+// ============================================
+router.post('/me/legal-acceptance', auth, async (req, res) => {
+  const acceptance = checkAcceptance(req.body, { reaccept: true });
+  if (!acceptance.ok) {
+    return res.status(acceptance.status).json(legalErrorBody(acceptance));
+  }
+  try {
+    const result = await db.query(
+      `UPDATE users
+       SET terms_version = $2, terms_accepted_at = NOW(),
+           privacy_version = $3, privacy_accepted_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING terms_version, terms_accepted_at, privacy_version, privacy_accepted_at`,
+      [req.user.userId, acceptance.terms, acceptance.privacy]
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Utilizador nao encontrado.' });
+    }
+    return res.json({ legal: legalStatus(result.rows[0]) });
+  } catch (err) {
+    if (err && err.code === '42703') {
+      return res.status(503).json({ error: LEGAL_SAVE_ERROR_MESSAGE, code: 'legal_unavailable' });
+    }
+    return res.status(500).json({ error: LEGAL_SAVE_ERROR_MESSAGE });
   }
 });
 

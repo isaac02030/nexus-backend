@@ -61,6 +61,10 @@ function mission(overrides) {
     partner_reminder_time: null,
     partner_timezone: null,
     mission_weekdays: null,
+    // Lembretes = sim (migração 009); o caso negado fica em
+    // test/notification-preferences.test.js.
+    user_reminders_on: true,
+    partner_reminders_on: true,
     ...overrides
   };
 }

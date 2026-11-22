@@ -27,6 +27,16 @@ const {
   errorBody: legalErrorBody,
   legalStatus
 } = require('../lib/legal-acceptance');
+const {
+  NOTIFICATION_CHOICE_VERSION,
+  PREFS_LOAD_ERROR,
+  PREFS_SAVE_ERROR,
+  PREFS_BODY_ERROR,
+  KINDS: NOTIFICATION_KINDS,
+  PREFS_SELECT,
+  parsePrefsBody,
+  prefsPayload
+} = require('../lib/notification-preferences');
 const router   = express.Router();
 
 const REGISTER_UNAVAILABLE_MESSAGE = 'O cadastro não está disponível agora. Tente de novo mais tarde.';
@@ -290,6 +300,65 @@ router.post('/me/legal-acceptance', auth, async (req, res) => {
       return res.status(503).json({ error: LEGAL_SAVE_ERROR_MESSAGE, code: 'legal_unavailable' });
     }
     return res.status(500).json({ error: LEGAL_SAVE_ERROR_MESSAGE });
+  }
+});
+
+// ============================================
+// LEMBRETES E NOVIDADES (lib/notification-preferences.js)
+// GET /api/users/me/notification-preferences
+// PUT /api/users/me/notification-preferences
+//     Body: { reminders?: true|false, news?: true|false } (ao menos um)
+// Resposta: { reminders: { choice, decided_at }, news: { choice, decided_at } }
+// choice: "yes" | "no" | null (null = ainda não escolheu: não envia).
+// Cada escolha muda sozinha, com a hora do servidor e a versão do texto.
+// Antes da migração 009: GET responde null nas duas; PUT responde 503.
+// ============================================
+router.get('/me/notification-preferences', auth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT ${PREFS_SELECT} FROM users WHERE id = $1`,
+      [req.user.userId]
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Utilizador nao encontrado.' });
+    }
+    return res.json(prefsPayload(result.rows[0]));
+  } catch (err) {
+    return res.status(500).json({ error: PREFS_LOAD_ERROR });
+  }
+});
+
+router.put('/me/notification-preferences', auth, async (req, res) => {
+  const changes = parsePrefsBody(req.body);
+  if (!changes) {
+    return res.status(400).json({ error: PREFS_BODY_ERROR, code: 'preferences_invalid' });
+  }
+  // Nomes de coluna só da lista fixa (KINDS); valores sempre por parâmetro.
+  const sets = [];
+  const params = [req.user.userId, NOTIFICATION_CHOICE_VERSION];
+  for (const [key, value] of Object.entries(changes)) {
+    const column = NOTIFICATION_KINDS[key];
+    params.push(value);
+    sets.push(`${column} = $${params.length}, ${column}_at = NOW(), ${column}_version = $2`);
+  }
+  try {
+    const result = await db.query(
+      `UPDATE users
+       SET ${sets.join(', ')}
+       WHERE id = $1
+       RETURNING reminders_opt_in::text AS reminders, reminders_opt_in_at AS reminders_at,
+                 news_opt_in::text AS news, news_opt_in_at AS news_at`,
+      params
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Utilizador nao encontrado.' });
+    }
+    return res.json(prefsPayload(result.rows[0]));
+  } catch (err) {
+    if (err && err.code === '42703') {
+      return res.status(503).json({ error: PREFS_SAVE_ERROR, code: 'preferences_unavailable' });
+    }
+    return res.status(500).json({ error: PREFS_SAVE_ERROR });
   }
 });
 

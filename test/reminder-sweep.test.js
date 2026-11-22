@@ -78,6 +78,10 @@ function mission(overrides) {
     user_timezone: 'America/Sao_Paulo',
     partner_reminder_time: '02:00',
     partner_timezone: 'Europe/Lisbon',
+    // Lembretes = sim (migração 009); o caso negado fica em
+    // test/notification-preferences.test.js.
+    user_reminders_on: true,
+    partner_reminders_on: true,
     ...overrides
   };
 }

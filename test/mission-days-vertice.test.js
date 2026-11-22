@@ -38,6 +38,7 @@ function normalize(sql) {
 function handle(sql, params = []) {
   const text = normalize(sql);
 
+  if (/^SELECT u.id FROM users u WHERE/i.test(text) && /news_opt_in/.test(text)) return { rows: [] };
   if (/FROM users/i.test(text) && /reminder_time/i.test(text)) {
     state.clockQueries += 1;
     const user = state.users.get(Number(params[0]));
@@ -112,10 +113,15 @@ function done(day, userId = 1) {
 let server;
 let baseUrl;
 
-async function request(method, path, { token, headers = {} } = {}) {
+async function request(method, path, { token, headers = {}, body } = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
-    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers }
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...headers
+    },
+    body: body === undefined ? undefined : JSON.stringify(body)
   });
   const raw = await response.text();
   return { status: response.status, body: raw ? JSON.parse(raw) : {} };
@@ -132,6 +138,7 @@ describe('Grande Irmão e dias livres', { concurrency: 1 }, () => {
     // Sorteio fixo: sempre a primeira frase de cada lista.
     mock.method(Math, 'random', () => 0);
     const app = express();
+    app.use(express.json());
     app.use('/api/vertice', require('../routes/vertice'));
     await new Promise(resolve => {
       server = http.createServer(app).listen(0, '127.0.0.1', resolve);
@@ -270,18 +277,20 @@ describe('Grande Irmão e dias livres', { concurrency: 1 }, () => {
     assert.deepEqual(former.body, { message: 'Sem missão ativa.' });
   });
 
-  test('envio para todos: nenhum aviso num dia livre; dia da missão e NULL avisam', async () => {
+  test('envio para todos não manda mais a frase da missão (só novidades, para quem escolheu)', async () => {
     reset();
     const started = startedForLegacyDay(5);
-    state.missions.push(mission({ id: 10, user_id: 1, started_at: started, mission_weekdays: weekdaysWithFreeDays(started, [5]) }));
-    state.missions.push(mission({ id: 11, user_id: 2, started_at: started, mission_weekdays: weekdaysWithFreeDays(started, [4]) }));
     state.missions.push(mission({ id: 12, user_id: 3, started_at: started }));
 
-    const res = await request('POST', '/api/vertice/notify-all', { headers: { 'x-vertice-secret': 'segredo-de-teste' } });
+    const res = await request('POST', '/api/vertice/notify-all', {
+      headers: { 'x-vertice-secret': 'segredo-de-teste' },
+      body: { title: 'Novidade', body: 'Texto da novidade.' }
+    });
 
+    // Ninguém aqui tem novidades = sim: nada sai, e as missões nem são lidas.
     assert.equal(res.status, 200);
-    assert.equal(res.body.notifications_sent, 2);
-    assert.deepEqual(state.pushes.map(p => p.userId).sort(), [2, 3]);
+    assert.equal(res.body.notifications_sent, 0);
+    assert.equal(state.pushes.length, 0);
   });
 
   test('envio para todos negado sem o segredo', async () => {

@@ -9,6 +9,7 @@ const { db } = require('../lib/db');
 const auth     = require('../middleware/auth');
 const { generateNotification } = require('../vertice');
 const { sendNotification }     = require('./notifications');
+const { newsAllowedSql }       = require('../lib/notification-preferences');
 const {
   FREE_DAY_CHECKIN_MESSAGE,
   currentStreak,
@@ -214,10 +215,30 @@ router.get('/message', auth, async (req, res) => {
 });
 
 // ============================================
-// DISPARAR NOTIFICAÇÕES PARA TODOS
+// NOVIDADES PARA QUEM ESCOLHEU RECEBER
 // POST /api/vertice/notify-all
-// (Chamado por um cron job ou manualmente)
+// Cabeçalho: x-vertice-secret (chave própria, VERTICE_SECRET)
+// Body: { title, body } (o texto da novidade, igual para todos)
+//
+// Decisão de 22/11 (lembretes separados das novidades): só sai para quem
+// tem novidades = sim (migração 009) e só com o conteúdo da novidade.
+// Antes, esta rota mandava a frase do Grande Irmão sobre a missão a TODAS
+// as missões ativas ou em espera, sem escolha da pessoa; isso saiu daqui
+// (os lembretes da missão ficam no motor de lembretes, para quem tem
+// lembretes = sim). Antes da 009: ninguém tem novidades = sim, nada sai.
+// O texto da novidade não vai para log.
 // ============================================
+const NEWS_TITLE_MAX = 80;
+const NEWS_BODY_MAX = 280;
+const NEWS_CONTENT_MESSAGE = `Falta o texto da novidade: título (até ${NEWS_TITLE_MAX} caracteres) e texto (até ${NEWS_BODY_MAX}).`;
+
+function newsText(value, max) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text || [...text].length > max) return null;
+  return text;
+}
+
 router.post('/notify-all', async (req, res) => {
   // Chave própria deste endpoint (VERTICE_SECRET). Não usa o JWT_SECRET
   // como reserva: se a chave falta ou é igual à do login, fica desligado.
@@ -229,59 +250,31 @@ router.post('/notify-all', async (req, res) => {
     return res.status(401).json({ error: 'Não autorizado.' });
   }
 
+  const title = newsText(req.body && req.body.title, NEWS_TITLE_MAX);
+  const body = newsText(req.body && req.body.body, NEWS_BODY_MAX);
+  if (!title || !body) {
+    return res.status(400).json({ error: NEWS_CONTENT_MESSAGE, code: 'news_content_required' });
+  }
+
   try {
-    // Buscar todas as missões ativas
-    const missionsRes = await db.query(
-      `SELECT m.*, u1.id AS uid1, u2.id AS uid2
-       FROM missions m
-       JOIN users u1 ON m.user_id = u1.id
-       LEFT JOIN users u2 ON m.partner_id = u2.id
-       WHERE m.status IN ('active', 'waiting')`
+    // Só quem disse sim às novidades e tem o push ligado em algum aparelho.
+    const recipientsRes = await db.query(
+      `SELECT u.id
+       FROM users u
+       WHERE ${newsAllowedSql('u')}
+         AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id)
+       ORDER BY u.id`
     );
 
     let sent = 0;
-
-    for (const mission of missionsRes.rows) {
-      const usersToNotify = [mission.user_id];
-      if (mission.partner_id) usersToNotify.push(mission.partner_id);
-
-      for (const userId of usersToNotify) {
-        const isWaiting = mission.status === 'waiting';
-        const { dayNumber, isMissionDay } = isWaiting
-          ? await missionToday({ ...mission, mission_weekdays: null }, userId, { startedOrNow: true })
-          : await missionToday(mission, userId, { startedOrNow: true });
-
-        // Dia livre: sem aviso, como no lembrete (routes/notifications.js).
-        if (!isWaiting && isFreeDay(dayNumber, mission.duration_days, isMissionDay)) continue;
-
-        const checkinRes = await db.query(
-          `SELECT * FROM checkins WHERE mission_id = $1 AND user_id = $2 AND day_number = $3`,
-          [mission.id, userId, dayNumber]
-        );
-        const userDoneToday = checkinRes.rows.length > 0;
-
-        const context = {
-          mode: mission.status === 'waiting' ? 'solo' : mission.mode,
-          dayNumber,
-          streak: 0,
-          userScore: 0,
-          partnerScore: 0,
-          rivalDoneToday: false,
-          partnerDoneToday: false,
-          userDoneToday,
-          isWaiting: mission.status === 'waiting'
-        };
-
-        const { title, body } = generateNotification(context);
-        await sendNotification(userId, title, body);
-        sent++;
-      }
+    for (const row of recipientsRes.rows) {
+      const attempted = await sendNotification(row.id, title, body, undefined, { kind: 'news' });
+      if (attempted > 0) sent++;
     }
 
     res.json({ success: true, notifications_sent: sent });
-
   } catch (err) {
-    console.error(err);
+    console.error('Erro no envio de novidades:', (err && (err.code || err.name)) || 'unknown');
     res.status(500).json({ error: 'Erro ao enviar notificações.' });
   }
 });

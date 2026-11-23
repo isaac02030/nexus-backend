@@ -765,8 +765,8 @@ describe('filtro de crise v2.2: regressão da v2.1 (frases com gatilho)', () => 
   });
 });
 
-// Comportamento travado pela pesquisadora (respostas ao PR 23). Os marcados
-// «revisar na v2.3» dependem da lista v2.3, do sim do dono e do profissional.
+// Comportamento travado pela pesquisadora (respostas ao PR 23). Os casos «v2.3»
+// seguem a decisão de 23/11; as duas exceções esperam o profissional.
 describe('filtro de crise v2.2: desvios e casos travados', () => {
   test('desvio 1: «mora» (morar) não é «morra»', () => {
     assert.equal(classifyNote('mora longe e eu junto'), null);
@@ -780,14 +780,14 @@ describe('filtro de crise v2.2: desvios e casos travados', () => {
   test('desvio 4: «ter morrido de saudade» não é exceção', () => {
     assert.equal(classifyNote('queria ter morrido de saudade'), 'alto');
   });
-  test('revisar na v2.3 (a): treino/academia depois de «me matei»/«mato-me» dá ALTO', () => {
+  test('v2.3 (a): treino/academia depois de «me matei»/«mato-me» continua ALTO (exceção desligada até o profissional)', () => {
     assert.equal(classifyNote('me matei no treino'), 'alto');
     assert.equal(classifyNote('mato-me na academia'), 'alto');
   });
-  test('revisar na v2.3 (b): «devia morrer» não dispara', () => {
-    assert.equal(classifyNote('devia morrer'), null);
+  test('v2.3 (b): «devia morrer» sozinho agora dispara ALTO (decisão de 23/11)', () => {
+    assert.equal(classifyNote('devia morrer'), 'alto');
   });
-  test('revisar na v2.3 (c): «morreu de rir e eu junto» dá ALTO', () => {
+  test('v2.3 (c): «morreu de rir e eu junto» continua ALTO (exceção desligada até o profissional)', () => {
     assert.equal(classifyNote('ele morreu de rir e eu junto'), 'alto');
   });
 });

@@ -52,7 +52,10 @@ async function healPairedMissionParticipants() {
       GROUP BY m.id
     )
     UPDATE missions m
-    SET partner_id = r.recovered_user_id
+    SET partner_id = r.recovered_user_id,
+        -- Parceiro que entra sempre tem início de par (a conversa só mostra
+        -- o que veio depois dele; sem início, a conversa fica vazia).
+        pair_started_at = COALESCE(m.pair_started_at, NOW())
     FROM recoverable r
     WHERE m.id = r.mission_id
       AND r.recovered_count = 1
@@ -84,46 +87,51 @@ async function healWaitingSoloMissions() {
   `);
 }
 
+// Encerra o par por mission_matches dentro de uma transação JÁ ABERTA pelo
+// chamador (o bloqueio do chat usa esta parte para gravar o bloqueio e o fim
+// do par juntos). Devolve false se não há par ativo.
+async function endMatchInTransaction(client, missionId, userId, { abandon = false } = {}) {
+  const pairRes = await client.query(
+    `SELECT mm.*, ma.user_id AS user_a, mb.user_id AS user_b,
+            ma.id AS mission_a, mb.id AS mission_b
+     FROM mission_matches mm
+     JOIN missions ma ON ma.id = mm.mission_a_id
+     JOIN missions mb ON mb.id = mm.mission_b_id
+     WHERE mm.status = 'active'
+       AND (mm.mission_a_id = $1 OR mm.mission_b_id = $1)
+       AND (ma.user_id = $2 OR mb.user_id = $2)
+     LIMIT 1
+     FOR UPDATE OF mm`,
+    [missionId, userId]
+  );
+  const pair = pairRes.rows[0];
+  if (!pair) return false;
+
+  const isMissionAOwner = Number(pair.user_a) === Number(userId);
+  const ownedMissionId = isMissionAOwner ? pair.mission_a : pair.mission_b;
+  const counterpartMissionId = isMissionAOwner ? pair.mission_b : pair.mission_a;
+  await client.query(
+    `UPDATE missions
+     SET mode = 'solo', partner_id = NULL, match_preference = NULL, pair_started_at = NULL,
+         status = CASE WHEN id = $1 AND $3 THEN 'abandoned' ELSE status END,
+         ends_at = CASE WHEN id = $1 AND $3 THEN NOW() ELSE ends_at END
+     WHERE id IN ($1, $2)`,
+    [ownedMissionId, counterpartMissionId, abandon]
+  );
+  await client.query(
+    `UPDATE mission_matches SET status = 'ended', ended_at = NOW() WHERE id = $1`,
+    [pair.id]
+  );
+  return true;
+}
+
 async function endLinkedMissionMatch(missionId, userId, { abandon = false } = {}) {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
-    const pairRes = await client.query(
-      `SELECT mm.*, ma.user_id AS user_a, mb.user_id AS user_b,
-              ma.id AS mission_a, mb.id AS mission_b
-       FROM mission_matches mm
-       JOIN missions ma ON ma.id = mm.mission_a_id
-       JOIN missions mb ON mb.id = mm.mission_b_id
-       WHERE mm.status = 'active'
-         AND (mm.mission_a_id = $1 OR mm.mission_b_id = $1)
-         AND (ma.user_id = $2 OR mb.user_id = $2)
-       LIMIT 1
-       FOR UPDATE OF mm`,
-      [missionId, userId]
-    );
-    const pair = pairRes.rows[0];
-    if (!pair) {
-      await client.query('COMMIT');
-      return false;
-    }
-
-    const isMissionAOwner = Number(pair.user_a) === Number(userId);
-    const ownedMissionId = isMissionAOwner ? pair.mission_a : pair.mission_b;
-    const counterpartMissionId = isMissionAOwner ? pair.mission_b : pair.mission_a;
-    await client.query(
-      `UPDATE missions
-       SET mode = 'solo', partner_id = NULL, match_preference = NULL, pair_started_at = NULL,
-           status = CASE WHEN id = $1 AND $3 THEN 'abandoned' ELSE status END,
-           ends_at = CASE WHEN id = $1 AND $3 THEN NOW() ELSE ends_at END
-       WHERE id IN ($1, $2)`,
-      [ownedMissionId, counterpartMissionId, abandon]
-    );
-    await client.query(
-      `UPDATE mission_matches SET status = 'ended', ended_at = NOW() WHERE id = $1`,
-      [pair.id]
-    );
+    const ended = await endMatchInTransaction(client, missionId, userId, { abandon });
     await client.query('COMMIT');
-    return true;
+    return ended;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -540,6 +548,19 @@ async function tryMatchMission(currentMission, currentUserId, pool) {
       return null;
     }
 
+    // Bloqueio do chat (migração 011): quem bloqueou ou foi bloqueado nunca
+    // vira par de novo. Antes da 011 a tabela não existe e não há bloqueio.
+    const blocksRes = await client.query(
+      "SELECT to_regclass('public.user_blocks') IS NOT NULL AS ready"
+    );
+    const blockClause = blocksRes.rows[0] && blocksRes.rows[0].ready === true
+      ? `AND NOT EXISTS (
+           SELECT 1 FROM user_blocks b
+           WHERE (b.blocker_id = $3 AND b.blocked_id = m.user_id)
+              OR (b.blocker_id = m.user_id AND b.blocked_id = $3)
+         )`
+      : '';
+
     const candidateRes = await client.query(
       `SELECT m.*
        FROM missions m
@@ -549,6 +570,7 @@ async function tryMatchMission(currentMission, currentUserId, pool) {
          AND LOWER(BTRIM(m.category)) = LOWER(BTRIM($2))
          AND m.user_id <> $3
          AND m.partner_id IS NULL
+         ${blockClause}
          AND NOT EXISTS (
            SELECT 1 FROM mission_matches mm
            WHERE mm.status = 'active'
@@ -578,23 +600,29 @@ async function tryMatchMission(currentMission, currentUserId, pool) {
       return null;
     }
 
-    const now = new Date();
-    await client.query(
+    // Início do par com o relógio do banco (NOW(), o mesmo de
+    // messages.created_at), nunca com o do Node: um TIMESTAMP sem fuso gravado
+    // a partir de um Date do Node pode ficar horas à frente e esconder as
+    // primeiras mensagens do par (revisão do Argos no PR 35). Na mesma
+    // transação, NOW() é o mesmo instante nas três linhas.
+    const matchRes = await client.query(
       `INSERT INTO mission_matches (mission_a_id, mission_b_id, mode, started_at)
-       VALUES ($1, $2, $3, $4)`,
-      [lockedCurrent.id, candidate.id, requestedMode, now]
+       VALUES ($1, $2, $3, NOW())
+       RETURNING started_at`,
+      [lockedCurrent.id, candidate.id, requestedMode]
+    );
+    const now = matchRes.rows[0] ? matchRes.rows[0].started_at : null;
+    await client.query(
+      `UPDATE missions
+       SET mode = $1, partner_id = $2, pair_started_at = NOW()
+       WHERE id = $3`,
+      [requestedMode, candidate.user_id, lockedCurrent.id]
     );
     await client.query(
       `UPDATE missions
-       SET mode = $1, partner_id = $2, pair_started_at = $3
-       WHERE id = $4`,
-      [requestedMode, candidate.user_id, now, lockedCurrent.id]
-    );
-    await client.query(
-      `UPDATE missions
-       SET mode = $1, partner_id = $2, pair_started_at = $3
-       WHERE id = $4`,
-      [requestedMode, currentUserId, now, candidate.id]
+       SET mode = $1, partner_id = $2, pair_started_at = NOW()
+       WHERE id = $3`,
+      [requestedMode, currentUserId, candidate.id]
     );
     await client.query('COMMIT');
 
@@ -611,3 +639,7 @@ async function tryMatchMission(currentMission, currentUserId, pool) {
 }
 
 module.exports = router;
+// Usadas pelo bloqueio do chat (routes/messages.js) e pelos testes.
+module.exports.endLinkedMissionMatch = endLinkedMissionMatch;
+module.exports.endMatchInTransaction = endMatchInTransaction;
+module.exports.tryMatchMission = tryMatchMission;

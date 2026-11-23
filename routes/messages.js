@@ -10,7 +10,67 @@ const { classifyNote } = require('../lib/crisis-filter');
 const { NOTE_MAX_CHARS, noteLength, validateNoteLimit } = require('../lib/note-limit');
 const { messagesAllowedSql } = require('../lib/notification-preferences');
 const { sendNotification } = require('./notifications');
+const { endMatchInTransaction } = require('./missions');
+const { ensureAdmin } = require('../lib/admin');
+const { REPORT_REASONS, isValidReason, reasonLabel } = require('../lib/post-reports');
 const router = express.Router();
+
+// ---------- PR D: bloquear e denunciar (migração 011, decisão de 23/11) ----------
+const BLOCK_DONE_MESSAGE = 'Pronto. O par foi encerrado e vocês não vão ser juntados de novo. A conversa sumiu para os dois.';
+const BLOCK_NOT_PAIR_MESSAGE = 'Você só pode bloquear a pessoa que está no seu par agora.';
+const BLOCK_UNAVAILABLE_MESSAGE = 'O bloqueio ainda não está disponível. Tente de novo mais tarde.';
+const BLOCK_SERVER_ERROR_MESSAGE = 'Não deu para bloquear agora. Tente de novo daqui a pouco.';
+
+// Denúncia de mensagem: os 5 motivos da denúncia de posts (lib/post-reports.js).
+const MESSAGE_REPORTS_PER_DAY = 10;
+const MREPORT_DONE_MESSAGE = 'Obrigado. Sua denúncia foi registrada.';
+const MREPORT_CRISIS_SAVED_MESSAGE = 'Sua denúncia foi registrada, sem o texto que você escreveu. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const MREPORT_CRISIS_NOT_SENT_MESSAGE = 'Sua denúncia não foi enviada. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const MREPORT_REASON_MESSAGE = 'Escolha um dos motivos da lista e envie de novo.';
+const MREPORT_DETAILS_NOT_TEXT_MESSAGE = 'O comentário precisa ser um texto. Escreva de novo e envie.';
+const MREPORT_DETAILS_TOO_LONG_MESSAGE = `O comentário passou de ${NOTE_MAX_CHARS} caracteres. Encurte um pouco e envie de novo.`;
+const MREPORT_NOT_FOUND_MESSAGE = 'Mensagem não encontrada nesta conversa.';
+const MREPORT_OWN_MESSAGE = 'Você não pode denunciar a sua própria mensagem.';
+const MREPORT_DUPLICATE_MESSAGE = 'Você já denunciou esta mensagem. Uma denúncia por pessoa já basta, obrigado.';
+const MREPORT_QUOTA_MESSAGE = `Você já fez ${MESSAGE_REPORTS_PER_DAY} denúncias nas últimas 24 horas. Tente de novo amanhã.`;
+const MREPORT_UNAVAILABLE_MESSAGE = 'A denúncia ainda não está disponível. Tente de novo mais tarde.';
+const MREPORT_SERVER_ERROR_MESSAGE = 'Não deu para enviar a denúncia agora. Tente de novo daqui a pouco.';
+const MOD_UNAVAILABLE_MESSAGE = 'A moderação do chat ainda não está disponível: falta aplicar a migração 011.';
+const MOD_SERVER_ERROR_MESSAGE = 'Não deu para concluir agora. Tente de novo daqui a pouco.';
+
+function isMissingSchema(err) {
+  return err && (err.code === '42703' || err.code === '42P01');
+}
+
+// Id: inteiro positivo que cabe num INTEGER do Postgres.
+function parseId(value) {
+  if (typeof value !== 'string' || !/^[1-9]\d{0,9}$/.test(value)) return null;
+  const id = Number(value);
+  return id <= 2147483647 ? id : null;
+}
+
+// A outra pessoa do par ATIVO desta missão, ou null. Par por mission_matches
+// (cada um com a sua missão) ou Duo na mesma missão (partner_id).
+async function activePartnerOf(queryable, mission, userId) {
+  const pairRes = await queryable.query(
+    `SELECT mm.id, ma.user_id AS user_a, mb.user_id AS user_b
+     FROM mission_matches mm
+     JOIN missions ma ON ma.id = mm.mission_a_id
+     JOIN missions mb ON mb.id = mm.mission_b_id
+     WHERE mm.status = 'active'
+       AND (mm.mission_a_id = $1 OR mm.mission_b_id = $1)
+     LIMIT 1`,
+    [mission.id]
+  );
+  const pair = pairRes.rows[0];
+  if (pair) {
+    const other = Number(pair.user_a) === Number(userId) ? pair.user_b : pair.user_a;
+    return { otherId: Number(other), matched: true };
+  }
+  if (!hasActivePair(mission)) return null;
+  const other = Number(mission.user_id) === Number(userId) ? mission.partner_id : mission.user_id;
+  return other == null ? null : { otherId: Number(other), matched: false };
+}
 
 // Filtro de crise no chat do Duo/Rival (PR A do plano do chat, decisão do
 // dono do projeto de 21/11). O mesmo filtro da nota do check-in e dos posts.
@@ -227,56 +287,330 @@ router.post('/', auth, async (req, res) => {
 });
 
 // ============================================
+// BLOQUEAR O PAR
+// POST /api/messages/:missionId/block
+//
+// Só o par ATIVO desta missão. Numa transação só: grava o bloqueio (impede um
+// novo par entre os dois) e encerra o par (por mission_matches, a mesma parte
+// de endLinkedMissionMatch; no Duo na mesma missão, o dono fica com ela em
+// Solo). Se algo falha, nada muda. Ninguém é apagado. Antes da 011: 503 e
+// nada muda.
+// ============================================
+router.post('/:missionId/block', auth, async (req, res) => {
+  const userId = req.user.userId;
+  const missionId = parseId(req.params.missionId);
+  if (!missionId) return res.status(403).json({ error: 'Sem acesso a esta missao.' });
+
+  let client;
+  try {
+    const missionRes = await db.query(
+      `SELECT * FROM missions m
+       WHERE id = $1
+         AND ${missionParticipantWhere('m', '$2')}`,
+      [missionId, userId]
+    );
+    const mission = missionRes.rows[0];
+    if (!mission) return res.status(403).json({ error: 'Sem acesso a esta missao.' });
+
+    const partner = await activePartnerOf(db, mission, userId);
+    if (!partner || partner.otherId === Number(userId)) {
+      return res.status(400).json({ error: BLOCK_NOT_PAIR_MESSAGE });
+    }
+
+    // Bloqueio e fim do par numa transação só: ou os dois, ou nenhum.
+    client = await db.connect();
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO user_blocks (blocker_id, blocked_id)
+       VALUES ($1, $2)
+       ON CONFLICT (blocker_id, blocked_id) DO NOTHING`,
+      [userId, partner.otherId]
+    );
+    if (partner.matched) {
+      const ended = await endMatchInTransaction(client, mission.id, userId);
+      if (!ended) throw new Error('par já encerrado');
+    } else {
+      // Duo na mesma missão: a missão fica com o dono, em Solo.
+      await client.query(
+        `UPDATE missions
+         SET mode = 'solo', partner_id = NULL, match_preference = NULL, pair_started_at = NULL
+         WHERE id = $1`,
+        [mission.id]
+      );
+    }
+    await client.query('COMMIT');
+
+    res.json({ blocked: true, message: BLOCK_DONE_MESSAGE });
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
+    }
+    // Sem log: nada do pedido vai para o console.
+    if (isMissingSchema(err)) return res.status(503).json({ error: BLOCK_UNAVAILABLE_MESSAGE });
+    res.status(500).json({ error: BLOCK_SERVER_ERROR_MESSAGE });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ============================================
+// DENUNCIAR UMA MENSAGEM
+// POST /api/messages/:messageId/report
+// Body: { reason, details? }
+//
+// Ordem: filtro de crise no comentário → id e motivo válidos → comentário até
+// 280 → (transação, com a pessoa travada) a mensagem é desta conversa → não é
+// a própria → cota de 10 por 24 horas → uma vez por pessoa → grava.
+// Crise no comentário: a denúncia vale, o comentário não é gravado nem logado,
+// e a resposta leva crisis + crisis_level. Recusada por outro motivo, a pessoa
+// vê a ajuda do mesmo jeito.
+// ============================================
+router.post('/:messageId/report', auth, async (req, res) => {
+  const userId = req.user.userId;
+  const { reason, details } = req.body || {};
+
+  const crisisLevel = typeof details === 'string' ? classifyNote(details) : null;
+  const refuse = (status, payload) => {
+    if (crisisLevel) {
+      return res.status(200).json({
+        reported: false,
+        crisis: true,
+        crisis_level: crisisLevel,
+        message: MREPORT_CRISIS_NOT_SENT_MESSAGE
+      });
+    }
+    return res.status(status).json(payload);
+  };
+
+  const messageId = parseId(req.params.messageId);
+  if (!messageId) return refuse(404, { error: MREPORT_NOT_FOUND_MESSAGE });
+  if (!isValidReason(reason)) return refuse(400, { error: MREPORT_REASON_MESSAGE });
+
+  let cleanDetails = null;
+  if (!crisisLevel && details != null) {
+    if (typeof details !== 'string') return refuse(400, { error: MREPORT_DETAILS_NOT_TEXT_MESSAGE });
+    const text = details.trim();
+    if (noteLength(text) > NOTE_MAX_CHARS) return refuse(400, { error: MREPORT_DETAILS_TOO_LONG_MESSAGE });
+    cleanDetails = text || null;
+  }
+
+  let client;
+  try {
+    client = await db.connect();
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+
+    // A mensagem tem de estar numa conversa de quem denuncia: na missão dela
+    // (dona ou parceira) ou na missão do par ativo dela.
+    const msgRes = await client.query(
+      `SELECT msg.id, msg.sender_id
+       FROM messages msg
+       JOIN missions mi ON mi.id = msg.mission_id
+       WHERE msg.id = $1
+         AND (
+           mi.user_id = $2 OR mi.partner_id = $2
+           OR EXISTS (
+             SELECT 1 FROM mission_matches mm
+             JOIN missions mine ON mine.id IN (mm.mission_a_id, mm.mission_b_id)
+             WHERE mm.status = 'active'
+               AND mi.id IN (mm.mission_a_id, mm.mission_b_id)
+               AND mine.user_id = $2
+           )
+         )`,
+      [messageId, userId]
+    );
+    const message = msgRes.rows[0];
+    if (!message) {
+      await client.query('ROLLBACK');
+      return refuse(404, { error: MREPORT_NOT_FOUND_MESSAGE });
+    }
+    if (Number(message.sender_id) === Number(userId)) {
+      await client.query('ROLLBACK');
+      return refuse(400, { error: MREPORT_OWN_MESSAGE });
+    }
+
+    const quotaRes = await client.query(
+      `SELECT COUNT(*) AS total
+       FROM message_reports
+       WHERE reporter_id = $1
+         AND created_at > NOW() - INTERVAL '24 hours'`,
+      [userId]
+    );
+    if ((parseInt(quotaRes.rows[0].total, 10) || 0) >= MESSAGE_REPORTS_PER_DAY) {
+      await client.query('ROLLBACK');
+      return refuse(429, { error: MREPORT_QUOTA_MESSAGE, limit: MESSAGE_REPORTS_PER_DAY });
+    }
+
+    const insertRes = await client.query(
+      `INSERT INTO message_reports (message_id, reporter_id, reason, details)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (message_id, reporter_id) DO NOTHING
+       RETURNING id`,
+      [messageId, userId, reason, cleanDetails]
+    );
+    if (insertRes.rowCount !== 1) {
+      await client.query('ROLLBACK');
+      return refuse(409, { error: MREPORT_DUPLICATE_MESSAGE, already_reported: true });
+    }
+    await client.query('COMMIT');
+
+    if (crisisLevel) {
+      return res.status(201).json({
+        reported: true,
+        crisis: true,
+        crisis_level: crisisLevel,
+        message: MREPORT_CRISIS_SAVED_MESSAGE
+      });
+    }
+    res.status(201).json({ reported: true, message: MREPORT_DONE_MESSAGE });
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
+    }
+    // Sem log: nada do pedido (nem o comentário) vai para o console.
+    if (isMissingSchema(err)) return refuse(503, { error: MREPORT_UNAVAILABLE_MESSAGE });
+    refuse(500, { error: MREPORT_SERVER_ERROR_MESSAGE });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ============================================
+// DENÚNCIAS DO CHAT (só admin)
+// GET /api/messages/admin/reports
+// A equipe vê só o trecho da mensagem, o motivo e o comentário. Nunca quem
+// denunciou, nem os nomes de quem conversa. Fica antes de /:missionId.
+// ============================================
+router.get('/admin/reports', auth, async (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  try {
+    const result = await db.query(
+      `SELECT r.id, r.message_id, r.reason, r.details, r.created_at,
+              msg.content AS excerpt
+       FROM message_reports r
+       JOIN messages msg ON msg.id = r.message_id
+       ORDER BY (r.reason = $1) DESC, r.created_at ASC
+       LIMIT 100`,
+      [REPORT_REASONS[0].code]
+    );
+    res.json({
+      reports: result.rows.map((row) => ({
+        id: row.id,
+        message_id: row.message_id,
+        excerpt: row.excerpt,
+        reason: row.reason,
+        reason_label: reasonLabel(row.reason),
+        details: row.details,
+        created_at: row.created_at
+      }))
+    });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: MOD_UNAVAILABLE_MESSAGE });
+    res.status(500).json({ error: MOD_SERVER_ERROR_MESSAGE });
+  }
+});
+
+// ============================================
 // VER CONVERSA DE UMA MISSAO
 // GET /api/messages/:missionId
+//
+// A conversa é a do par ATUAL (decisão de 23/11, «a conversa some para os
+// dois»; achados do Argos no PR 35). Só aparecem as mensagens:
+//   - das missões do par atual (a própria e, no par por mission_matches, a do
+//     outro lado);
+//   - escritas pelas duas pessoas do par atual;
+//   - enviadas depois do início deste par (started_at do mission_matches; no
+//     Duo na mesma missão, pair_started_at; sem ele, a conversa vem vazia);
+//   - e só se não houver bloqueio entre as duas.
+// Sem par ativo (Solo, par encerrado, bloqueio): conversa vazia. Mensagens de
+// um par antigo nunca aparecem para um par novo. Nada é apagado do banco.
 // ============================================
 router.get('/:missionId', auth, async (req, res) => {
   const userId = req.user.userId;
+  const missionId = parseId(String(req.params.missionId));
+  if (!missionId) return res.status(403).json({ error: 'Sem acesso a esta missao.' });
 
   try {
     const missionRes = await db.query(
       `SELECT * FROM missions m
        WHERE id = $1
          AND ${missionParticipantWhere('m', '$2')}`,
-      [req.params.missionId, userId]
+      [missionId, userId]
     );
-
-    if (!missionRes.rows[0]) {
+    const mission = missionRes.rows[0];
+    if (!mission) {
       return res.status(403).json({ error: 'Sem acesso a esta missao.' });
     }
 
-    const pairRes = await db.query(
-      `SELECT mission_a_id, mission_b_id
-       FROM mission_matches
-       WHERE status = 'active'
-         AND (mission_a_id = $1 OR mission_b_id = $1)
-       LIMIT 1`,
-      [req.params.missionId]
-    );
-    const pair = pairRes.rows[0];
-    const missionIds = [Number(req.params.missionId)];
-    if (pair) {
-      missionIds.push(Number(pair.mission_a_id) === Number(req.params.missionId)
-        ? Number(pair.mission_b_id)
-        : Number(pair.mission_a_id));
-    }
+    const empty = () => res.json({ mission_id: missionId, messages: [] });
+    const conversation = await currentConversation(db, mission);
+    if (!conversation) return empty();
+    if (await blockedBetween(db, conversation.people)) return empty();
 
     const result = await db.query(
       `SELECT m.*, u.username AS sender_name
        FROM messages m
        JOIN users u ON m.sender_id = u.id
        WHERE m.mission_id = ANY($1::int[])
+         AND m.sender_id = ANY($2::int[])
+         AND ($3::timestamp IS NULL OR m.created_at >= $3::timestamp)
        ORDER BY m.created_at ASC, m.id ASC`,
-      [missionIds]
+      [conversation.missionIds, conversation.people, conversation.since]
     );
 
-    res.json({
-      mission_id: parseInt(req.params.missionId, 10),
-      messages: result.rows
-    });
+    res.json({ mission_id: missionId, messages: result.rows });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao obter mensagens.' });
   }
 });
+
+// O par atual desta missão: { missionIds, people, since }, ou null sem par.
+async function currentConversation(queryable, mission) {
+  const pairRes = await queryable.query(
+    `SELECT mm.mission_a_id, mm.mission_b_id, mm.started_at,
+            ma.user_id AS user_a, mb.user_id AS user_b
+     FROM mission_matches mm
+     JOIN missions ma ON ma.id = mm.mission_a_id
+     JOIN missions mb ON mb.id = mm.mission_b_id
+     WHERE mm.status = 'active'
+       AND (mm.mission_a_id = $1 OR mm.mission_b_id = $1)
+     LIMIT 1`,
+    [mission.id]
+  );
+  const pair = pairRes.rows[0];
+  if (pair) {
+    return {
+      missionIds: [Number(pair.mission_a_id), Number(pair.mission_b_id)],
+      people: [Number(pair.user_a), Number(pair.user_b)],
+      since: pair.started_at || null
+    };
+  }
+  if (!hasActivePair(mission)) return null;
+  // Duo na mesma missão sem início de par: falha fechada (conversa vazia),
+  // para um parceiro novo nunca ver mensagens antigas do dono.
+  if (!mission.pair_started_at) return null;
+  return {
+    missionIds: [Number(mission.id)],
+    people: [Number(mission.user_id), Number(mission.partner_id)],
+    since: mission.pair_started_at
+  };
+}
+
+// Há bloqueio entre as duas pessoas? Antes da 011 a tabela não existe: não há.
+async function blockedBetween(queryable, people) {
+  try {
+    const res = await queryable.query(
+      `SELECT 1 FROM user_blocks
+       WHERE (blocker_id = $1 AND blocked_id = $2)
+          OR (blocker_id = $2 AND blocked_id = $1)
+       LIMIT 1`,
+      [people[0], people[1]]
+    );
+    return res.rows.length > 0;
+  } catch (err) {
+    if (isMissingSchema(err)) return false;
+    throw err;
+  }
+}
 
 module.exports = router;

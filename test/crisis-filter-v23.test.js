@@ -75,14 +75,28 @@ describe('filtro de crise v2.3 (4): guarda de «juntar»', () => {
       'morreu e eu junto não sei o que fazer', 'morreu e eu junto. as coisas dele'], 'alto');
   });
 
-  test('não dispara com artigo ou possessivo logo depois', () => {
+  test('não dispara com «eu junto» + objeto concreto da lista fechada', () => {
     all(['morreu e eu junto as coisas dele', 'morreu e eu junto os papéis',
       'meu pai morreu e eu junto o dinheiro do funeral', 'morreu e eu junto minhas coisas',
-      'faleceu e eu junto uns documentos', 'morreu e eu junto suas fotos'], null);
+      'morreu e eu junto suas fotos', 'ela faleceu e eu junto os documentos'], null);
+  });
+
+  test('achados do Argos no PR 31: «vou junto» e objeto fora da lista continuam ALTO (casos negados)', () => {
+    all(['ele morreu e eu vou junto um dia', 'se ele morrer eu vou junto uma hora dessas',
+      'morreu e eu vou junto uns dias depois', 'minha mãe morreu e eu vou junto o quanto antes',
+      'ela morreu e eu vou junto meus dias', 'se ele morrer, eu vou junto o mesmo dia'], 'alto');
+    // A mesma coisa com «eu junto»: só objeto concreto da lista cala.
+    all(['morreu e eu junto um dia', 'morreu e eu junto o quanto antes', 'morreu e eu junto meus dias',
+      'faleceu e eu junto uns documentos', 'morreu e eu vou junto as coisas dele'], 'alto');
+    // E as 6 frases eram ALTO na v2.2.
+    for (const note of ['ele morreu e eu vou junto um dia', 'se ele morrer, eu vou junto o mesmo dia']) {
+      assert.equal(reference.classifyNote(note), 'alto', `v2.2: ${note}`);
+    }
   });
 
   test('a guarda não vale para «eu morro junto» nem atravessa pontuação (casos negados)', () => {
-    all(['ele morreu e eu morro junto as vezes', 'morreu e eu junto, as coisas ficam'], 'alto');
+    all(['ele morreu e eu morro junto as vezes', 'morreu e eu junto, as coisas ficam',
+      'morreu e eu junto as. coisas', 'morreu e eu. junto as coisas dele', 'morreu e eu, junto os papéis'], 'alto');
   });
 });
 
@@ -152,12 +166,20 @@ describe('filtro de crise v2.3: regressão e equivalência', () => {
     }
   });
 
+  // Lista fechada dos objetos aprovados (escrita à mão, não lida do filtro):
+  // se o filtro calar qualquer outra coisa, o teste pega.
+  const APPROVED_JUNTO = [
+    'as coisas', 'minhas coisas', 'suas coisas', 'os papeis', 'meus papeis', 'seus papeis',
+    'as roupas', 'minhas roupas', 'suas roupas', 'os pertences', 'meus pertences', 'seus pertences',
+    'os documentos', 'meus documentos', 'seus documentos', 'as fotos', 'minhas fotos', 'suas fotos',
+    'o dinheiro'
+  ].map(object => new RegExp(`(^|[^a-z])eu junto ${object}([^a-z]|$)`));
+
   test('nunca desce de nível em relação à v2.2, fora da guarda de «juntar» aprovada', () => {
     const notes = buildNotes();
     assert.ok(notes.length > 30000, `conjunto pequeno demais: ${notes.length}`);
     const RANK = { alto: 2, medio: 1 };
     const rank = level => RANK[level] || 0;
-    const guarded = /(^|[^a-z])junto (o|os|as|um|uma|uns|umas|meus|minhas|seus|suas)([^a-z]|$)/;
     const lower = [];
     let higher = 0;
     let allowed = 0;
@@ -167,7 +189,7 @@ describe('filtro de crise v2.3: regressão e equivalência', () => {
       if (rank(now) > rank(before)) higher++;
       if (rank(now) >= rank(before)) continue;
       const plain = note.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-      if (guarded.test(plain)) { allowed++; continue; }
+      if (APPROVED_JUNTO.some(approved => approved.test(plain))) { allowed++; continue; }
       lower.push({ note, before, now });
     }
     assert.deepEqual(lower.slice(0, 10), [], `${lower.length} notas desceram fora da exceção aprovada`);

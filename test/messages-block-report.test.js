@@ -44,6 +44,7 @@ function resetDb() {
   db.matches = [{ id: 1, mission_a_id: 100, mission_b_id: 101, status: 'active', started_at: OLD_PAIR }];
   db.missions[2].pair_started_at = OLD_PAIR;
   db.failEnd = false;
+  db.clockShift = 0;
   db.messages = [
     { id: 1, mission_id: 100, sender_id: 10, content: 'oi do dez' },
     { id: 2, mission_id: 101, sender_id: 11, content: 'oi do onze' },
@@ -53,10 +54,14 @@ function resetDb() {
   ].map((m) => ({ ...m, created_at: OLD_MESSAGE }));
 }
 
-// Mensagem nova (depois de um par novo).
-function newMessage(missionId, senderId, content) {
+// Relógio do banco (NOW()). clockShift simula um banco em outro fuso que o
+// Node: um TIMESTAMP sem fuso gravado a partir de um Date do Node fica deslocado.
+const dbNow = () => new Date(Date.now() + db.clockShift);
+
+// Mensagem nova (depois de um par novo), com o relógio do banco, como NOW().
+function newMessage(missionId, senderId, content, afterMs = 60 * 1000) {
   const row = { id: db.messages.length + 1, mission_id: missionId, sender_id: senderId, content,
-    created_at: new Date(Date.now() + 60 * 1000) };
+    created_at: new Date(dbNow().getTime() + afterMs) };
   db.messages.push(row);
   return row;
 }
@@ -185,12 +190,14 @@ function handle(sql, params = []) {
     return { rows: rows.slice(0, 1).map((m) => ({ ...m })) };
   }
   if (/^INSERT INTO mission_matches/.test(text)) {
+    // NOW() no SQL = relógio do banco; um parâmetro = relógio do Node.
+    const startedAt = /NOW\(\)/.test(text) ? dbNow() : new Date(params[3]);
     db.matches.push({ id: db.matches.length + 1, mission_a_id: Number(params[0]), mission_b_id: Number(params[1]),
-      status: 'active', started_at: new Date(params[3]) });
-    return { rows: [], rowCount: 1 };
+      status: 'active', started_at: startedAt });
+    return { rows: [{ started_at: startedAt }], rowCount: 1 };
   }
-  if (/^UPDATE missions SET mode = \$1, partner_id = \$2, pair_started_at = \$3 WHERE id = \$4$/.test(text)) {
-    Object.assign(mission(params[3]), { mode: params[0], partner_id: Number(params[1]) });
+  if (/^UPDATE missions SET mode = \$1, partner_id = \$2, pair_started_at = NOW\(\) WHERE id = \$3$/.test(text)) {
+    Object.assign(mission(params[2]), { mode: params[0], partner_id: Number(params[1]), pair_started_at: dbNow() });
     return { rows: [], rowCount: 1 };
   }
   return { rows: [] };
@@ -297,7 +304,7 @@ describe('chat do Duo/Rival: bloquear e denunciar', { concurrency: 1 }, () => {
 
   test('negado: no Duo da mesma missão, o parceiro novo não vê o que o antigo escreveu', async () => {
     // O parceiro 21 saiu; entrou o 22, com o par começando agora.
-    Object.assign(mission(200), { partner_id: 22, pair_started_at: new Date() });
+    Object.assign(mission(200), { partner_id: 22, pair_started_at: dbNow() });
     const fresh = newMessage(200, 22, 'cheguei');
     for (const user of [20, 22]) {
       const res = await call('GET', '/api/messages/200', user);
@@ -305,6 +312,31 @@ describe('chat do Duo/Rival: bloquear e denunciar', { concurrency: 1 }, () => {
     }
     // E quem saiu não lê mais nada da missão.
     assert.equal((await call('GET', '/api/messages/200', 21)).status, 403);
+  });
+
+  test('fuso: com o banco em outro fuso que o Node, as primeiras mensagens do par aparecem', async () => {
+    db.clockShift = -3 * 60 * 60 * 1000; // o banco «está» 3 horas atrás do Node
+    db.matches[0].status = 'ended';
+    for (const id of [100, 101]) Object.assign(mission(id), { mode: 'solo', partner_id: null, match_preference: 'parceiro' });
+    const paired = await tryMatchMission(mission(100), 10, pool);
+    assert.ok(paired);
+    const insert = db.queries.find((q) => /^INSERT INTO mission_matches/.test(q.text));
+    assert.match(insert.text, /NOW\(\)/, 'o início do par usa o relógio do banco');
+    assert.equal(insert.params.some((p) => p instanceof Date), false, 'nenhum Date do Node no início do par');
+    const first = newMessage(100, 10, 'primeira', 1000);
+    const res = await call('GET', '/api/messages/101', 11);
+    assert.deepEqual(res.body.messages.map((m) => m.id), [first.id]);
+    assert.ok(mission(100).pair_started_at && mission(101).pair_started_at, 'as duas missões ganham o início do par');
+  });
+
+  test('negado: Duo na mesma missão sem início de par mostra a conversa vazia (falha fechada)', async () => {
+    Object.assign(mission(200), { partner_id: 22, pair_started_at: null });
+    newMessage(200, 22, 'cheguei');
+    for (const user of [20, 22]) {
+      const res = await call('GET', '/api/messages/200', user);
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body.messages, [], `pessoa ${user}`);
+    }
   });
 
   test('negado: falha no fim do par não deixa bloqueio pela metade', async () => {

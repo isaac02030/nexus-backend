@@ -520,7 +520,7 @@ router.get('/admin/reports', auth, async (req, res) => {
 //     outro lado);
 //   - escritas pelas duas pessoas do par atual;
 //   - enviadas depois do início deste par (started_at do mission_matches; no
-//     Duo na mesma missão, pair_started_at, quando existe);
+//     Duo na mesma missão, pair_started_at; sem ele, a conversa vem vazia);
 //   - e só se não houver bloqueio entre as duas.
 // Sem par ativo (Solo, par encerrado, bloqueio): conversa vazia. Mensagens de
 // um par antigo nunca aparecem para um par novo. Nada é apagado do banco.
@@ -586,10 +586,13 @@ async function currentConversation(queryable, mission) {
     };
   }
   if (!hasActivePair(mission)) return null;
+  // Duo na mesma missão sem início de par: falha fechada (conversa vazia),
+  // para um parceiro novo nunca ver mensagens antigas do dono.
+  if (!mission.pair_started_at) return null;
   return {
     missionIds: [Number(mission.id)],
     people: [Number(mission.user_id), Number(mission.partner_id)],
-    since: mission.pair_started_at || null
+    since: mission.pair_started_at
   };
 }
 

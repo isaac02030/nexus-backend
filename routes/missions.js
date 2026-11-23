@@ -52,7 +52,10 @@ async function healPairedMissionParticipants() {
       GROUP BY m.id
     )
     UPDATE missions m
-    SET partner_id = r.recovered_user_id
+    SET partner_id = r.recovered_user_id,
+        -- Parceiro que entra sempre tem início de par (a conversa só mostra
+        -- o que veio depois dele; sem início, a conversa fica vazia).
+        pair_started_at = COALESCE(m.pair_started_at, NOW())
     FROM recoverable r
     WHERE m.id = r.mission_id
       AND r.recovered_count = 1
@@ -597,23 +600,29 @@ async function tryMatchMission(currentMission, currentUserId, pool) {
       return null;
     }
 
-    const now = new Date();
-    await client.query(
+    // Início do par com o relógio do banco (NOW(), o mesmo de
+    // messages.created_at), nunca com o do Node: um TIMESTAMP sem fuso gravado
+    // a partir de um Date do Node pode ficar horas à frente e esconder as
+    // primeiras mensagens do par (revisão do Argos no PR 35). Na mesma
+    // transação, NOW() é o mesmo instante nas três linhas.
+    const matchRes = await client.query(
       `INSERT INTO mission_matches (mission_a_id, mission_b_id, mode, started_at)
-       VALUES ($1, $2, $3, $4)`,
-      [lockedCurrent.id, candidate.id, requestedMode, now]
+       VALUES ($1, $2, $3, NOW())
+       RETURNING started_at`,
+      [lockedCurrent.id, candidate.id, requestedMode]
+    );
+    const now = matchRes.rows[0] ? matchRes.rows[0].started_at : null;
+    await client.query(
+      `UPDATE missions
+       SET mode = $1, partner_id = $2, pair_started_at = NOW()
+       WHERE id = $3`,
+      [requestedMode, candidate.user_id, lockedCurrent.id]
     );
     await client.query(
       `UPDATE missions
-       SET mode = $1, partner_id = $2, pair_started_at = $3
-       WHERE id = $4`,
-      [requestedMode, candidate.user_id, now, lockedCurrent.id]
-    );
-    await client.query(
-      `UPDATE missions
-       SET mode = $1, partner_id = $2, pair_started_at = $3
-       WHERE id = $4`,
-      [requestedMode, currentUserId, now, candidate.id]
+       SET mode = $1, partner_id = $2, pair_started_at = NOW()
+       WHERE id = $3`,
+      [requestedMode, currentUserId, candidate.id]
     );
     await client.query('COMMIT');
 

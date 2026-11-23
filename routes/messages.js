@@ -10,7 +10,7 @@ const { classifyNote } = require('../lib/crisis-filter');
 const { NOTE_MAX_CHARS, noteLength, validateNoteLimit } = require('../lib/note-limit');
 const { messagesAllowedSql } = require('../lib/notification-preferences');
 const { sendNotification } = require('./notifications');
-const { endLinkedMissionMatch } = require('./missions');
+const { endMatchInTransaction } = require('./missions');
 const { ensureAdmin } = require('../lib/admin');
 const { REPORT_REASONS, isValidReason, reasonLabel } = require('../lib/post-reports');
 const router = express.Router();
@@ -290,11 +290,11 @@ router.post('/', auth, async (req, res) => {
 // BLOQUEAR O PAR
 // POST /api/messages/:missionId/block
 //
-// Só o par ATIVO desta missão. Grava o bloqueio (impede um novo par entre os
-// dois) e encerra o par: por mission_matches, com endLinkedMissionMatch (as
-// duas missões voltam a Solo); no Duo na mesma missão, o dono fica com ela em
-// Solo. Ninguém é apagado. Antes da 011: 503 e nada muda (o bloqueio é gravado
-// primeiro, então o par nunca acaba sem o registro).
+// Só o par ATIVO desta missão. Numa transação só: grava o bloqueio (impede um
+// novo par entre os dois) e encerra o par (por mission_matches, a mesma parte
+// de endLinkedMissionMatch; no Duo na mesma missão, o dono fica com ela em
+// Solo). Se algo falha, nada muda. Ninguém é apagado. Antes da 011: 503 e
+// nada muda.
 // ============================================
 router.post('/:missionId/block', auth, async (req, res) => {
   const userId = req.user.userId;
@@ -317,6 +317,7 @@ router.post('/:missionId/block', auth, async (req, res) => {
       return res.status(400).json({ error: BLOCK_NOT_PAIR_MESSAGE });
     }
 
+    // Bloqueio e fim do par numa transação só: ou os dois, ou nenhum.
     client = await db.connect();
     await client.query('BEGIN');
     await client.query(
@@ -325,7 +326,10 @@ router.post('/:missionId/block', auth, async (req, res) => {
        ON CONFLICT (blocker_id, blocked_id) DO NOTHING`,
       [userId, partner.otherId]
     );
-    if (!partner.matched) {
+    if (partner.matched) {
+      const ended = await endMatchInTransaction(client, mission.id, userId);
+      if (!ended) throw new Error('par já encerrado');
+    } else {
       // Duo na mesma missão: a missão fica com o dono, em Solo.
       await client.query(
         `UPDATE missions
@@ -335,10 +339,6 @@ router.post('/:missionId/block', auth, async (req, res) => {
       );
     }
     await client.query('COMMIT');
-    client.release();
-    client = null;
-
-    if (partner.matched) await endLinkedMissionMatch(mission.id, userId);
 
     res.json({ blocked: true, message: BLOCK_DONE_MESSAGE });
   } catch (err) {
@@ -513,74 +513,101 @@ router.get('/admin/reports', auth, async (req, res) => {
 // ============================================
 // VER CONVERSA DE UMA MISSAO
 // GET /api/messages/:missionId
+//
+// A conversa é a do par ATUAL (decisão de 23/11, «a conversa some para os
+// dois»; achados do Argos no PR 35). Só aparecem as mensagens:
+//   - das missões do par atual (a própria e, no par por mission_matches, a do
+//     outro lado);
+//   - escritas pelas duas pessoas do par atual;
+//   - enviadas depois do início deste par (started_at do mission_matches; no
+//     Duo na mesma missão, pair_started_at, quando existe);
+//   - e só se não houver bloqueio entre as duas.
+// Sem par ativo (Solo, par encerrado, bloqueio): conversa vazia. Mensagens de
+// um par antigo nunca aparecem para um par novo. Nada é apagado do banco.
 // ============================================
 router.get('/:missionId', auth, async (req, res) => {
   const userId = req.user.userId;
+  const missionId = parseId(String(req.params.missionId));
+  if (!missionId) return res.status(403).json({ error: 'Sem acesso a esta missao.' });
 
   try {
     const missionRes = await db.query(
       `SELECT * FROM missions m
        WHERE id = $1
          AND ${missionParticipantWhere('m', '$2')}`,
-      [req.params.missionId, userId]
+      [missionId, userId]
     );
-
-    if (!missionRes.rows[0]) {
+    const mission = missionRes.rows[0];
+    if (!mission) {
       return res.status(403).json({ error: 'Sem acesso a esta missao.' });
     }
 
-    const pairRes = await db.query(
-      `SELECT mission_a_id, mission_b_id
-       FROM mission_matches
-       WHERE status = 'active'
-         AND (mission_a_id = $1 OR mission_b_id = $1)
-       LIMIT 1`,
-      [req.params.missionId]
+    const empty = () => res.json({ mission_id: missionId, messages: [] });
+    const conversation = await currentConversation(db, mission);
+    if (!conversation) return empty();
+    if (await blockedBetween(db, conversation.people)) return empty();
+
+    const result = await db.query(
+      `SELECT m.*, u.username AS sender_name
+       FROM messages m
+       JOIN users u ON m.sender_id = u.id
+       WHERE m.mission_id = ANY($1::int[])
+         AND m.sender_id = ANY($2::int[])
+         AND ($3::timestamp IS NULL OR m.created_at >= $3::timestamp)
+       ORDER BY m.created_at ASC, m.id ASC`,
+      [conversation.missionIds, conversation.people, conversation.since]
     );
-    const pair = pairRes.rows[0];
-    const missionIds = [Number(req.params.missionId)];
-    if (pair) {
-      missionIds.push(Number(pair.mission_a_id) === Number(req.params.missionId)
-        ? Number(pair.mission_b_id)
-        : Number(pair.mission_a_id));
-    }
 
-    // Bloqueio (011): as mensagens de quem bloqueou ou foi bloqueado somem
-    // para os dois. Nada é apagado. Antes da 011 não há bloqueio.
-    let result;
-    try {
-      result = await db.query(
-        `SELECT m.*, u.username AS sender_name
-         FROM messages m
-         JOIN users u ON m.sender_id = u.id
-         WHERE m.mission_id = ANY($1::int[])
-           AND NOT EXISTS (
-             SELECT 1 FROM user_blocks b
-             WHERE (b.blocker_id = $2 AND b.blocked_id = m.sender_id)
-                OR (b.blocker_id = m.sender_id AND b.blocked_id = $2)
-           )
-         ORDER BY m.created_at ASC, m.id ASC`,
-        [missionIds, userId]
-      );
-    } catch (err) {
-      if (!isMissingSchema(err)) throw err;
-      result = await db.query(
-        `SELECT m.*, u.username AS sender_name
-         FROM messages m
-         JOIN users u ON m.sender_id = u.id
-         WHERE m.mission_id = ANY($1::int[])
-         ORDER BY m.created_at ASC, m.id ASC`,
-        [missionIds]
-      );
-    }
-
-    res.json({
-      mission_id: parseInt(req.params.missionId, 10),
-      messages: result.rows
-    });
+    res.json({ mission_id: missionId, messages: result.rows });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao obter mensagens.' });
   }
 });
+
+// O par atual desta missão: { missionIds, people, since }, ou null sem par.
+async function currentConversation(queryable, mission) {
+  const pairRes = await queryable.query(
+    `SELECT mm.mission_a_id, mm.mission_b_id, mm.started_at,
+            ma.user_id AS user_a, mb.user_id AS user_b
+     FROM mission_matches mm
+     JOIN missions ma ON ma.id = mm.mission_a_id
+     JOIN missions mb ON mb.id = mm.mission_b_id
+     WHERE mm.status = 'active'
+       AND (mm.mission_a_id = $1 OR mm.mission_b_id = $1)
+     LIMIT 1`,
+    [mission.id]
+  );
+  const pair = pairRes.rows[0];
+  if (pair) {
+    return {
+      missionIds: [Number(pair.mission_a_id), Number(pair.mission_b_id)],
+      people: [Number(pair.user_a), Number(pair.user_b)],
+      since: pair.started_at || null
+    };
+  }
+  if (!hasActivePair(mission)) return null;
+  return {
+    missionIds: [Number(mission.id)],
+    people: [Number(mission.user_id), Number(mission.partner_id)],
+    since: mission.pair_started_at || null
+  };
+}
+
+// Há bloqueio entre as duas pessoas? Antes da 011 a tabela não existe: não há.
+async function blockedBetween(queryable, people) {
+  try {
+    const res = await queryable.query(
+      `SELECT 1 FROM user_blocks
+       WHERE (blocker_id = $1 AND blocked_id = $2)
+          OR (blocker_id = $2 AND blocked_id = $1)
+       LIMIT 1`,
+      [people[0], people[1]]
+    );
+    return res.rows.length > 0;
+  } catch (err) {
+    if (isMissingSchema(err)) return false;
+    throw err;
+  }
+}
 
 module.exports = router;

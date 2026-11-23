@@ -24,6 +24,8 @@ app.use('/api/messages', messagesRouter);
 
 const ADMIN = 1;
 const db = {};
+const OLD_PAIR = new Date('2026-11-20T10:00:00Z');
+const OLD_MESSAGE = new Date('2026-11-21T10:00:00Z');
 
 function resetDb() {
   db.migrated = true;
@@ -39,14 +41,24 @@ function resetDb() {
     // Solo.
     { id: 300, user_id: 30, partner_id: null, mode: 'solo', status: 'active' }
   ];
-  db.matches = [{ id: 1, mission_a_id: 100, mission_b_id: 101, status: 'active' }];
+  db.matches = [{ id: 1, mission_a_id: 100, mission_b_id: 101, status: 'active', started_at: OLD_PAIR }];
+  db.missions[2].pair_started_at = OLD_PAIR;
+  db.failEnd = false;
   db.messages = [
     { id: 1, mission_id: 100, sender_id: 10, content: 'oi do dez' },
     { id: 2, mission_id: 101, sender_id: 11, content: 'oi do onze' },
     { id: 3, mission_id: 200, sender_id: 21, content: 'oi do vinte e um' },
     { id: 4, mission_id: 200, sender_id: 20, content: 'oi do vinte' },
     { id: 5, mission_id: 300, sender_id: 30, content: 'sozinho' }
-  ];
+  ].map((m) => ({ ...m, created_at: OLD_MESSAGE }));
+}
+
+// Mensagem nova (depois de um par novo).
+function newMessage(missionId, senderId, content) {
+  const row = { id: db.messages.length + 1, mission_id: missionId, sender_id: senderId, content,
+    created_at: new Date(Date.now() + 60 * 1000) };
+  db.messages.push(row);
+  return row;
 }
 
 const normalize = (sql) => String(sql).replace(/\s+/g, ' ').trim();
@@ -59,7 +71,23 @@ function handle(sql, params = []) {
   const text = normalize(sql);
   db.queries.push({ text, params });
   if (!db.migrated && /user_blocks|message_reports/.test(text) && !/to_regclass/.test(text)) throw missing();
-  if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(text)) return { rows: [] };
+  // Transação de verdade no simulador: ROLLBACK desfaz tudo desde o BEGIN.
+  if (text === 'BEGIN') {
+    db.snapshot = JSON.stringify({ missions: db.missions, matches: db.matches, blocks: db.blocks, reports: db.reports });
+    return { rows: [] };
+  }
+  if (text === 'ROLLBACK') {
+    if (db.snapshot) {
+      const back = JSON.parse(db.snapshot);
+      db.missions = back.missions;
+      db.matches = back.matches.map((mm) => ({ ...mm, started_at: mm.started_at && new Date(mm.started_at) }));
+      db.blocks = back.blocks;
+      db.reports = back.reports;
+    }
+    db.snapshot = null;
+    return { rows: [] };
+  }
+  if (text === 'COMMIT') { db.snapshot = null; return { rows: [] }; }
   if (/^SELECT id FROM users WHERE id = \$1 FOR UPDATE$/.test(text)) return { rows: [{ id: params[0] }] };
 
   if (/^SELECT \* FROM missions m WHERE id = \$1 AND \( m\.user_id = \$2 OR m\.partner_id = \$2 \)$/.test(text)) {
@@ -91,6 +119,7 @@ function handle(sql, params = []) {
     return { rows: [], rowCount: 2 };
   }
   if (/^UPDATE mission_matches SET status = 'ended'/.test(text)) {
+    if (db.failEnd) throw new Error('falha simulada no fim do par');
     db.matches.find((mm) => mm.id === Number(params[0])).status = 'ended';
     return { rows: [], rowCount: 1 };
   }
@@ -100,10 +129,17 @@ function handle(sql, params = []) {
     const mm = activeMatchOf(Number(params[0]));
     return { rows: mm ? [{ ...mm }] : [] };
   }
+  if (/^SELECT 1 FROM user_blocks WHERE/.test(text)) {
+    return { rows: blocked(Number(params[0]), Number(params[1])) ? [{ '?column?': 1 }] : [] };
+  }
   if (/FROM messages m JOIN users u ON m\.sender_id = u\.id WHERE m\.mission_id = ANY/.test(text)) {
+    assert.match(text, /m\.sender_id = ANY\(\$2::int\[\]\)/);
     const ids = params[0].map(Number);
-    let rows = db.messages.filter((m) => ids.includes(m.mission_id));
-    if (/user_blocks/.test(text)) rows = rows.filter((m) => !blocked(Number(params[1]), m.sender_id));
+    const people = params[1].map(Number);
+    // O simulador só aplica o que o SQL pede (uma mudança no SQL aparece aqui).
+    const since = /m\.created_at >= \$3::timestamp/.test(text) && params[2] ? new Date(params[2]).getTime() : null;
+    const rows = db.messages.filter((m) => ids.includes(m.mission_id) && people.includes(m.sender_id)
+      && (since === null || new Date(m.created_at).getTime() >= since));
     return { rows: rows.map((m) => ({ ...m, sender_name: `pessoa${m.sender_id}` })) };
   }
 
@@ -149,7 +185,8 @@ function handle(sql, params = []) {
     return { rows: rows.slice(0, 1).map((m) => ({ ...m })) };
   }
   if (/^INSERT INTO mission_matches/.test(text)) {
-    db.matches.push({ id: db.matches.length + 1, mission_a_id: Number(params[0]), mission_b_id: Number(params[1]), status: 'active' });
+    db.matches.push({ id: db.matches.length + 1, mission_a_id: Number(params[0]), mission_b_id: Number(params[1]),
+      status: 'active', started_at: new Date(params[3]) });
     return { rows: [], rowCount: 1 };
   }
   if (/^UPDATE missions SET mode = \$1, partner_id = \$2, pair_started_at = \$3 WHERE id = \$4$/.test(text)) {
@@ -222,13 +259,68 @@ describe('chat do Duo/Rival: bloquear e denunciar', { concurrency: 1 }, () => {
     assert.equal(consoleCalls.length, 0);
   });
 
-  test('a conversa some para os dois depois do bloqueio (sem apagar)', async () => {
-    await block(100, 10);
+  test('antes do bloqueio, os dois veem a conversa inteira do par', async () => {
     const ten = await call('GET', '/api/messages/100', 10);
-    const eleven = await call('GET', '/api/messages/101', 11);
-    assert.equal(ten.body.messages.some((m) => m.sender_id === 11), false);
-    assert.equal(eleven.body.messages.some((m) => m.sender_id === 10), false);
+    assert.deepEqual(ten.body.messages.map((m) => m.id), [1, 2]);
+    const owner = await call('GET', '/api/messages/200', 20);
+    assert.deepEqual(owner.body.messages.map((m) => m.id), [3, 4]);
+  });
+
+  test('negado: depois do bloqueio, os dois veem a conversa vazia (nada apagado)', async () => {
+    await block(100, 10);
+    for (const [mission, user] of [[100, 10], [101, 11]]) {
+      const res = await call('GET', `/api/messages/${mission}`, user);
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body.messages, [], `missão ${mission}`);
+    }
     assert.equal(db.messages.length, 5);
+  });
+
+  test('negado: o dono que forma um par novo não vê as mensagens do par antigo, nem o par novo', async () => {
+    await block(100, 10);
+    // Par novo de 10 com 12 (mission_matches).
+    db.missions.push({ id: 102, user_id: 12, partner_id: null, mode: 'solo', status: 'active',
+      match_preference: 'parceiro', level: 'iniciante', category: 'estudo' });
+    mission(100).match_preference = 'parceiro';
+    const paired = await tryMatchMission(mission(100), 10, pool);
+    assert.equal(paired.partnerMission.user_id, 12);
+    const mine = newMessage(100, 10, 'oi, doze');
+    const theirs = newMessage(102, 12, 'oi, dez');
+    const ten = await call('GET', '/api/messages/100', 10);
+    const twelve = await call('GET', '/api/messages/102', 12);
+    assert.deepEqual(ten.body.messages.map((m) => m.id), [mine.id, theirs.id]);
+    assert.deepEqual(twelve.body.messages.map((m) => m.id), [mine.id, theirs.id]);
+    for (const res of [ten, twelve]) {
+      assert.equal(res.body.messages.some((m) => [1, 2].includes(m.id)), false, 'nada do par antigo');
+    }
+  });
+
+  test('negado: no Duo da mesma missão, o parceiro novo não vê o que o antigo escreveu', async () => {
+    // O parceiro 21 saiu; entrou o 22, com o par começando agora.
+    Object.assign(mission(200), { partner_id: 22, pair_started_at: new Date() });
+    const fresh = newMessage(200, 22, 'cheguei');
+    for (const user of [20, 22]) {
+      const res = await call('GET', '/api/messages/200', user);
+      assert.deepEqual(res.body.messages.map((m) => m.id), [fresh.id], `pessoa ${user}`);
+    }
+    // E quem saiu não lê mais nada da missão.
+    assert.equal((await call('GET', '/api/messages/200', 21)).status, 403);
+  });
+
+  test('negado: falha no fim do par não deixa bloqueio pela metade', async () => {
+    db.failEnd = true;
+    const res = await block(100, 10);
+    assert.equal(res.status, 500);
+    assert.equal(res.body.error, 'Não deu para bloquear agora. Tente de novo daqui a pouco.');
+    assert.deepEqual(db.blocks, [], 'o bloqueio foi desfeito junto');
+    assert.equal(db.matches[0].status, 'active');
+    assert.equal(mission(100).partner_id, 11);
+    assert.equal(mission(101).partner_id, 10);
+    assert.equal(consoleCalls.length, 0);
+    // E dá para tentar de novo.
+    db.failEnd = false;
+    assert.equal((await block(100, 10)).status, 200);
+    assert.deepEqual(db.blocks, [{ blocker_id: 10, blocked_id: 11 }]);
   });
 
   test('Duo na mesma missão: quem é parceiro bloqueia; o dono fica com a missão em Solo', async () => {
@@ -239,7 +331,7 @@ describe('chat do Duo/Rival: bloquear e denunciar', { concurrency: 1 }, () => {
     assert.equal(mission(200).mode, 'solo');
     assert.equal(mission(200).partner_id, null);
     const owner = await call('GET', '/api/messages/200', 20);
-    assert.deepEqual(owner.body.messages.map((m) => m.sender_id), [20]);
+    assert.deepEqual(owner.body.messages, [], 'a conversa some também para o dono');
   });
 
   test('negado: não dá para bloquear quem não é o seu par', async () => {

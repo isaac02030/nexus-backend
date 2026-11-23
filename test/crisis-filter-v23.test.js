@@ -76,9 +76,16 @@ describe('filtro de crise v2.3 (4): guarda de «juntar»', () => {
   });
 
   test('não dispara com «eu junto» + objeto concreto da lista fechada', () => {
-    all(['morreu e eu junto as coisas dele', 'morreu e eu junto os papéis',
-      'meu pai morreu e eu junto o dinheiro do funeral', 'morreu e eu junto minhas coisas',
-      'morreu e eu junto suas fotos', 'ela faleceu e eu junto os documentos'], null);
+    all(['morreu e eu junto as coisas dele', 'ele morreu e eu junto as coisas dele',
+      'ele morreu e eu junto as coisas dele.', 'morreu e eu junto os papéis', 'morreu e eu junto minhas coisas',
+      'morreu e eu junto suas fotos', 'ela faleceu e eu junto os documentos',
+      'ele morreu e eu junto as roupas do meu pai. amanha volto ao treino'], null);
+  });
+
+  test('2.ª leitura do Argos: com risco depois do objeto, a guarda não vale (casos negados)', () => {
+    all(['ele morreu e eu junto as coisas dele e vou junto', 'ele morreu e eu junto as coisas dele e vou tambem',
+      'ele morreu e eu junto as coisas dele pra ir junto', 'ele morreu e eu junto as coisas dele para o fim',
+      'ele morreu e eu junto as fotos e acabo com tudo', 'meu pai morreu e eu junto o dinheiro do funeral'], 'alto');
   });
 
   test('achados do Argos no PR 31: «vou junto» e objeto fora da lista continuam ALTO (casos negados)', () => {

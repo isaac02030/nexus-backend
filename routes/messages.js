@@ -6,7 +6,15 @@
 const express = require('express');
 const { db } = require('../lib/db');
 const auth = require('../middleware/auth');
+const { classifyNote } = require('../lib/crisis-filter');
 const router = express.Router();
+
+// Filtro de crise no chat do Duo/Rival (PR A do plano do chat, decisão do
+// dono do projeto de 21/11). O mesmo filtro da nota do check-in e dos posts.
+// Com alerta: a mensagem não é gravada, nenhum aviso sai, o parceiro não sabe
+// de nada e o texto não vai para log. A resposta leva crisis + crisis_level
+// para o site abrir a ajuda. Texto calmo no molde do assistente e dos posts.
+const MESSAGE_CRISIS_MESSAGE = 'Sua mensagem não foi enviada. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
 
 function missionParticipantWhere(alias = 'm', userParam = '$2') {
   return `(
@@ -23,6 +31,20 @@ function missionParticipantWhere(alias = 'm', userParam = '$2') {
 router.post('/', auth, async (req, res) => {
   const { mission_id, content } = req.body;
   const userId = req.user.userId;
+
+  // Antes de qualquer consulta ao banco (e antes da checagem de duplicata):
+  // com alerta, nada é lido nem gravado. Vale também para quem não tem acesso
+  // à missão: a pessoa vê a ajuda e nada é revelado sobre a missão.
+  const crisisLevel = typeof content === 'string' ? classifyNote(content) : null;
+  if (crisisLevel) {
+    return res.status(200).json({
+      sent: false,
+      crisis: true,
+      crisis_level: crisisLevel,
+      message: MESSAGE_CRISIS_MESSAGE
+    });
+  }
+
   const trimmedContent = content?.trim();
 
   if (!mission_id || !trimmedContent) {

@@ -91,6 +91,11 @@ function handleQuery(sql, params = []) {
     return { rows: [] };
   }
 
+  // Limite por hora e por dia do chat (PR B): ninguém perto do limite aqui.
+  if (/FROM messages/i.test(text) && /INTERVAL '24 hours'/i.test(text)) {
+    return { rows: [{ last_hour: '0', last_day: '0' }] };
+  }
+
   if (/FROM messages m/i.test(text) && /WHERE m\.id = \$1/i.test(text)) {
     return {
       rows: [{

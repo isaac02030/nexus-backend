@@ -25,7 +25,7 @@ const db = { missions: [], messages: [], queries: [] };
 
 function resetDb() {
   db.missions = [
-    { id: 7, user_id: 1, partner_id: 2, status: 'active', mode: 'duo' },
+    { id: 7, user_id: 1, partner_id: 2, status: 'active', mode: 'parceiro' },
     { id: 8, user_id: 5, partner_id: null, status: 'active', mode: 'solo' }
   ];
   db.messages = [];
@@ -47,6 +47,9 @@ function handle(sql, params = []) {
   }
   if (/FROM messages m JOIN users u ON u\.id = m\.sender_id WHERE m\.mission_id = \$1 AND m\.sender_id = \$2 AND m\.content = \$3/i.test(text)) {
     return { rows: [] };
+  }
+  if (/FROM messages WHERE sender_id = \$1 AND created_at > NOW\(\) - INTERVAL '24 hours'/i.test(text)) {
+    return { rows: [{ last_hour: '0', last_day: '0' }] };
   }
   if (/^INSERT INTO messages/i.test(text)) {
     const row = { id: db.messages.length + 1, mission_id: Number(params[0]), sender_id: Number(params[1]), content: params[2] };

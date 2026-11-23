@@ -322,8 +322,10 @@ router.post('/me/legal-acceptance', auth, async (req, res) => {
 // LEMBRETES E NOVIDADES (lib/notification-preferences.js)
 // GET /api/users/me/notification-preferences
 // PUT /api/users/me/notification-preferences
-//     Body: { reminders?: true|false, news?: true|false } (ao menos um)
-// Resposta: { reminders: { choice, decided_at }, news: { choice, decided_at } }
+//     Body: { reminders?: true|false, news?: true|false, messages?: true|false } (ao menos um)
+// Resposta: { reminders: { choice, decided_at }, news: {...}, messages: {...} }
+// messages = aviso de mensagem nova do chat (migração 010). Antes da 010:
+// GET responde null; PUT com messages responde 503.
 // choice: "yes" | "no" | null (null = ainda não escolheu: não envia).
 // Cada escolha muda sozinha, com a hora do servidor e a versão do texto.
 // Antes da migração 009: GET responde null nas duas; PUT responde 503.
@@ -361,8 +363,7 @@ router.put('/me/notification-preferences', auth, async (req, res) => {
       `UPDATE users
        SET ${sets.join(', ')}
        WHERE id = $1
-       RETURNING reminders_opt_in::text AS reminders, reminders_opt_in_at AS reminders_at,
-                 news_opt_in::text AS news, news_opt_in_at AS news_at`,
+       RETURNING ${PREFS_SELECT}`,
       params
     );
     if (!result.rows[0]) {

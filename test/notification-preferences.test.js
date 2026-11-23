@@ -230,12 +230,13 @@ describe('lembretes separados das novidades', { concurrency: 1 }, () => {
   });
 
   // ---------- rotas ----------
-  test('nenhuma nasce ligada: as duas começam sem escolha (null)', async () => {
+  test('nenhuma nasce ligada: as três começam sem escolha (null)', async () => {
     const res = await prefs.read();
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, {
       reminders: { choice: null, decided_at: null },
-      news: { choice: null, decided_at: null }
+      news: { choice: null, decided_at: null },
+      messages: { choice: null, decided_at: null }
     });
   });
 

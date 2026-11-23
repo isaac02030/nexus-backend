@@ -168,12 +168,28 @@ describe('chat do Duo/Rival: tamanho, frequência e par ativo', { concurrency: 1
     assert.equal(touchedDb(), false, 'recusado antes do banco');
   });
 
-  test('negado: texto enorme é recusado antes do filtro de crise e do banco', async () => {
-    const res = await send({ mission_id: 7, content: `quero morrer ${'a'.repeat(5000)}` });
-    assert.equal(res.status, 400);
-    assert.equal(res.body.crisis, undefined, 'texto enorme não passa pelo filtro');
+  test('negado: texto de 5000 caracteres com frase de crise no começo mostra a ajuda', async () => {
+    const content = `quero morrer ${'a'.repeat(5000)}`;
+    assert.ok([...content].length > 5000);
+    const res = await send({ mission_id: 7, content });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.crisis, true);
+    assert.equal(res.body.crisis_level, 'alto');
+    assert.equal(res.body.sent, false);
     assert.equal(touchedDb(), false);
     assert.equal(consoleCalls.length, 0);
+  });
+
+  test('negado: texto enorme sem crise nos primeiros 1000 caracteres é recusado sem tocar no banco', async () => {
+    const res = await send({ mission_id: 7, content: 'b'.repeat(5000) });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'A mensagem passou de 280 caracteres. Encurte um pouco e envie de novo.');
+    assert.equal(res.body.crisis, undefined);
+    assert.equal(touchedDb(), false);
+    // O filtro lê no máximo 1000 caracteres: depois disso, vale só o tamanho.
+    const late = await send({ mission_id: 7, content: `${'b '.repeat(600)}quero morrer` });
+    assert.equal(late.status, 400);
+    assert.equal(late.body.crisis, undefined);
   });
 
   test('crise numa mensagem um pouco longa (até o teto) ainda mostra a ajuda', async () => {

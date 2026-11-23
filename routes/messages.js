@@ -22,9 +22,10 @@ const MESSAGE_CRISIS_MESSAGE = 'Sua mensagem não foi enviada. Parece que você 
 // PR B do plano do chat: tamanho, frequência e par ativo (sem migração).
 // 280 caracteres reais, o mesmo limite da nota do check-in (lib/note-limit.js).
 const MESSAGE_MAX_CHARS = NOTE_MAX_CHARS;
-// Texto enorme é recusado antes do filtro de crise e do banco (o filtro não
-// precisa ler 1 MB). Entre 281 e este teto, o filtro roda primeiro: quem
-// escreveu uma frase de crise longa vê a ajuda, não um erro de tamanho.
+// Texto enorme: o filtro de crise lê só os primeiros 1000 caracteres (o
+// servidor nunca filtra 1 MB). Com alerta neles, a pessoa vê a ajuda; sem
+// alerta, recusa pelo tamanho, sem tocar no banco (decisão do Maestro, lado
+// protetor). Entre 281 e este teto, o filtro lê o texto todo e depois vem o 400.
 const MESSAGE_HARD_MAX_CHARS = 1000;
 // Frequência por pessoa (estimativa do Vitrúvio, ajustável aqui).
 const MESSAGES_PER_HOUR = 20;
@@ -89,7 +90,8 @@ function missionParticipantWhere(alias = 'm', userParam = '$2') {
 // POST /api/messages
 // Body: { mission_id, content }
 //
-// Ordem: texto enorme (sem ler o banco) → filtro de crise → texto válido e até
+// Ordem: filtro de crise (nos primeiros 1000 caracteres, se o texto for enorme)
+// → texto enorme recusado (sem ler o banco) → texto válido e até
 // 280 caracteres → missão do pedido → missão ativa → Duo/Rival ativo →
 // (transação, com a linha da pessoa travada) duplicata → limite por hora e
 // por dia → grava.
@@ -98,14 +100,13 @@ router.post('/', auth, async (req, res) => {
   const { mission_id, content } = req.body || {};
   const userId = req.user.userId;
 
-  if (typeof content === 'string' && noteLength(content) > MESSAGE_HARD_MAX_CHARS) {
-    return res.status(400).json({ error: MESSAGE_TOO_LONG_MESSAGE });
-  }
+  const tooBig = typeof content === 'string' && noteLength(content) > MESSAGE_HARD_MAX_CHARS;
 
   // Antes de qualquer consulta ao banco (e antes da checagem de duplicata):
   // com alerta, nada é lido nem gravado. Vale também para quem não tem acesso
   // à missão: a pessoa vê a ajuda e nada é revelado sobre a missão.
-  const crisisLevel = typeof content === 'string' ? classifyNote(content) : null;
+  const filtered = tooBig ? [...content].slice(0, MESSAGE_HARD_MAX_CHARS).join('') : content;
+  const crisisLevel = typeof filtered === 'string' ? classifyNote(filtered) : null;
   if (crisisLevel) {
     return res.status(200).json({
       sent: false,
@@ -113,6 +114,9 @@ router.post('/', auth, async (req, res) => {
       crisis_level: crisisLevel,
       message: MESSAGE_CRISIS_MESSAGE
     });
+  }
+  if (tooBig) {
+    return res.status(400).json({ error: MESSAGE_TOO_LONG_MESSAGE });
   }
 
   if (content != null && typeof content !== 'string') {

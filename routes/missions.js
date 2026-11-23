@@ -540,6 +540,19 @@ async function tryMatchMission(currentMission, currentUserId, pool) {
       return null;
     }
 
+    // Bloqueio do chat (migração 011): quem bloqueou ou foi bloqueado nunca
+    // vira par de novo. Antes da 011 a tabela não existe e não há bloqueio.
+    const blocksRes = await client.query(
+      "SELECT to_regclass('public.user_blocks') IS NOT NULL AS ready"
+    );
+    const blockClause = blocksRes.rows[0] && blocksRes.rows[0].ready === true
+      ? `AND NOT EXISTS (
+           SELECT 1 FROM user_blocks b
+           WHERE (b.blocker_id = $3 AND b.blocked_id = m.user_id)
+              OR (b.blocker_id = m.user_id AND b.blocked_id = $3)
+         )`
+      : '';
+
     const candidateRes = await client.query(
       `SELECT m.*
        FROM missions m
@@ -549,6 +562,7 @@ async function tryMatchMission(currentMission, currentUserId, pool) {
          AND LOWER(BTRIM(m.category)) = LOWER(BTRIM($2))
          AND m.user_id <> $3
          AND m.partner_id IS NULL
+         ${blockClause}
          AND NOT EXISTS (
            SELECT 1 FROM mission_matches mm
            WHERE mm.status = 'active'
@@ -611,3 +625,6 @@ async function tryMatchMission(currentMission, currentUserId, pool) {
 }
 
 module.exports = router;
+// Usadas pelo bloqueio do chat (routes/messages.js) e pelos testes.
+module.exports.endLinkedMissionMatch = endLinkedMissionMatch;
+module.exports.tryMatchMission = tryMatchMission;

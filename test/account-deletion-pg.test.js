@@ -38,7 +38,7 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
   for (const f of ['001_initial_schema.sql', '002_user_reminder.sql', '003_checkin_difficult_day.sql',
     '004_mission_weekdays.sql', '005_community_post_reports.sql', '006_user_adult_confirmation.sql',
     '007_user_note_consent.sql', '008_user_legal_acceptance.sql',
-    '009_user_notification_choices.sql', '010_user_message_notice.sql']) {
+    '009_user_notification_choices.sql', '010_user_message_notice.sql', '011_chat_blocks_and_reports.sql']) {
     psqlFile(path.join(repoRoot, 'migrations', f));
   }
   psqlFile(path.join(repoRoot, 'scripts', 'sql', 'papel-do-app.sql'));

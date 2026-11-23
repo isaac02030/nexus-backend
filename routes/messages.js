@@ -8,6 +8,8 @@ const { db } = require('../lib/db');
 const auth = require('../middleware/auth');
 const { classifyNote } = require('../lib/crisis-filter');
 const { NOTE_MAX_CHARS, noteLength, validateNoteLimit } = require('../lib/note-limit');
+const { messagesAllowedSql } = require('../lib/notification-preferences');
+const { sendNotification } = require('./notifications');
 const router = express.Router();
 
 // Filtro de crise no chat do Duo/Rival (PR A do plano do chat, decisão do
@@ -35,6 +37,40 @@ const MESSAGE_NO_PAIR_MESSAGE = 'A conversa só funciona enquanto o Duo ou o Riv
 const MESSAGE_HOUR_LIMIT_MESSAGE = 'Você enviou muitas mensagens nesta hora. Espere um pouco e envie de novo.';
 const MESSAGE_DAY_LIMIT_MESSAGE = 'Você chegou ao limite de mensagens de hoje. Amanhã dá para enviar de novo.';
 const MESSAGE_SERVER_ERROR_MESSAGE = 'Erro ao enviar mensagem.';
+
+// PR C: aviso de mensagem nova (decisão de 23/11). Texto fixo, sem nome nem
+// trecho (a tela bloqueada não mostra nada da conversa). Interruptor próprio
+// (migração 010, message_notice_opt_in), desligado por padrão. No máximo 1 por
+// dia por conversa: notification_log com kind 'chat' (UNIQUE por pessoa,
+// missão, tipo e dia). Mensagem barrada por crise nunca chega aqui.
+const MESSAGE_NOTICE_TITLE = 'Você tem uma mensagem nova.';
+const MESSAGE_NOTICE_BODY = '';
+const MESSAGE_NOTICE_URL = '/nexus-v2/missao.html';
+const MESSAGE_NOTICE_KIND = 'chat';
+
+// Reserva o aviso do dia (só para quem ligou o aviso) e, se for o primeiro
+// do dia nesta conversa, manda. Falha aqui nunca derruba o envio.
+async function noticeNewMessage(recipientId, missionId) {
+  try {
+    const claim = await db.query(
+      `INSERT INTO notification_log (user_id, mission_id, kind)
+       SELECT u.id, $2, $3
+       FROM users u
+       WHERE u.id = $1
+         AND ${messagesAllowedSql('u')}
+       ON CONFLICT (user_id, mission_id, kind, sent_on) DO NOTHING
+       RETURNING id`,
+      [recipientId, missionId, MESSAGE_NOTICE_KIND]
+    );
+    if (!claim.rows[0]) return false;
+    await sendNotification(recipientId, MESSAGE_NOTICE_TITLE, MESSAGE_NOTICE_BODY, MESSAGE_NOTICE_URL,
+      { kind: 'messages' });
+    return true;
+  } catch (_) {
+    // Sem log: nada da conversa vai para o console.
+    return false;
+  }
+}
 
 // Duo (parceiro) ou Rival com a outra pessoa ainda na missão. É a mesma
 // regra que a saída da missão usa (routes/missions.js).
@@ -173,6 +209,10 @@ router.post('/', auth, async (req, res) => {
       [insertRes.rows[0].id]
     );
     await client.query('COMMIT');
+
+    // A outra pessoa da missão recebe o aviso (se ligou o aviso).
+    const recipientId = Number(mission.user_id) === Number(userId) ? mission.partner_id : mission.user_id;
+    if (recipientId != null) await noticeNewMessage(recipientId, mission.id);
 
     res.status(201).json({ message: messageRes.rows[0] });
   } catch (err) {

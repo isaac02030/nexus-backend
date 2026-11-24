@@ -24,8 +24,8 @@ const BLOCK_SERVER_ERROR_MESSAGE = 'Não deu para bloquear agora. Tente de novo 
 // Denúncia de mensagem: os 5 motivos da denúncia de posts (lib/post-reports.js).
 const MESSAGE_REPORTS_PER_DAY = 10;
 const MREPORT_DONE_MESSAGE = 'Obrigado. Sua denúncia foi registrada.';
-const MREPORT_CRISIS_SAVED_MESSAGE = 'Sua denúncia foi registrada, sem o texto que você escreveu. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
-const MREPORT_CRISIS_NOT_SENT_MESSAGE = 'Sua denúncia não foi enviada. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const MREPORT_CRISIS_SAVED_MESSAGE = 'Sua denúncia foi registrada, sem o texto que você escreveu. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
+const MREPORT_CRISIS_NOT_SENT_MESSAGE = 'Sua denúncia não foi enviada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
 const MREPORT_REASON_MESSAGE = 'Escolha um dos motivos da lista e envie de novo.';
 const MREPORT_DETAILS_NOT_TEXT_MESSAGE = 'O comentário precisa ser um texto. Escreva de novo e envie.';
 const MREPORT_DETAILS_TOO_LONG_MESSAGE = `O comentário passou de ${NOTE_MAX_CHARS} caracteres. Encurte um pouco e envie de novo.`;
@@ -77,7 +77,7 @@ async function activePartnerOf(queryable, mission, userId) {
 // Com alerta: a mensagem não é gravada, nenhum aviso sai, o parceiro não sabe
 // de nada e o texto não vai para log. A resposta leva crisis + crisis_level
 // para o site abrir a ajuda. Texto calmo no molde do assistente e dos posts.
-const MESSAGE_CRISIS_MESSAGE = 'Sua mensagem não foi enviada. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const MESSAGE_CRISIS_MESSAGE = 'Sua mensagem não foi enviada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
 
 // PR B do plano do chat: tamanho, frequência e par ativo (sem migração).
 // 280 caracteres reais, o mesmo limite da nota do check-in (lib/note-limit.js).

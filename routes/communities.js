@@ -28,7 +28,7 @@ const router   = express.Router();
 const POST_MAX_CHARS = NOTE_MAX_CHARS;
 const POSTS_PER_DAY = 3;
 
-const POST_CRISIS_MESSAGE = 'Seu post não foi publicado. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const POST_CRISIS_MESSAGE = 'Seu post não foi publicado. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
 const POST_NOT_TEXT_MESSAGE = 'O post precisa ser um texto. Escreva de novo e envie.';
 const POST_EMPTY_MESSAGE = 'O post está vazio. Escreva alguma coisa e envie.';
 const POST_TOO_LONG_MESSAGE = `O post passou de ${POST_MAX_CHARS} caracteres. Encurte um pouco e envie de novo.`;
@@ -39,8 +39,8 @@ const POST_SERVER_ERROR_MESSAGE = 'Não deu para publicar agora. Tente de novo d
 
 // Denúncia de posts (regras em lib/post-reports.js).
 const REPORT_DONE_MESSAGE = 'Obrigado. Sua denúncia foi registrada.';
-const REPORT_CRISIS_SAVED_MESSAGE = 'Sua denúncia foi registrada, sem o texto que você escreveu. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
-const REPORT_CRISIS_NOT_SENT_MESSAGE = 'Sua denúncia não foi enviada. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const REPORT_CRISIS_SAVED_MESSAGE = 'Sua denúncia foi registrada, sem o texto que você escreveu. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
+const REPORT_CRISIS_NOT_SENT_MESSAGE = 'Sua denúncia não foi enviada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
 const REPORT_REASON_MESSAGE = 'Escolha um dos motivos da lista e envie de novo.';
 const REPORT_DETAILS_NOT_TEXT_MESSAGE = 'O comentário precisa ser um texto. Escreva de novo e envie.';
 const REPORT_DETAILS_TOO_LONG_MESSAGE = `O comentário passou de ${NOTE_MAX_CHARS} caracteres. Encurte um pouco e envie de novo.`;

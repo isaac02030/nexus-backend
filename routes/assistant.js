@@ -10,7 +10,7 @@ const DEFAULT_ASSISTANT_MODEL = 'gpt-4o-mini';
 // Filtro de crise antes da IA (decisão de 22/11): a pergunta e os campos
 // livres da missão que entram no prompt passam pelo mesmo classificador das
 // notas. Com alerta, nada vai à OpenAI e a resposta leva crisis + crisis_level.
-const ASSISTANT_CRISIS_MESSAGE = 'Sua pergunta não foi enviada ao assistente. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const ASSISTANT_CRISIS_MESSAGE = 'Sua pergunta não foi enviada ao assistente. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
 const MISSION_FREE_TEXT_FIELDS = [
   'title',
   'daily_minimum',

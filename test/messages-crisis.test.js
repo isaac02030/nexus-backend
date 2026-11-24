@@ -19,7 +19,7 @@ const app = express();
 app.use(express.json());
 app.use('/api/messages', messagesRouter);
 
-const CRISIS_TEXT = 'Sua mensagem não foi enviada. Parece que você está passando por um momento difícil. Veja os contatos de ajuda.';
+const CRISIS_TEXT = 'Sua mensagem não foi enviada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
 
 // Missão 7: dono 1, parceiro 2. A pessoa 3 não participa. A 4 saiu do par.
 const db = { missions: [], messages: [], queries: [] };

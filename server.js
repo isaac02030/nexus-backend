@@ -103,6 +103,13 @@ const insightsRoutes = require('./routes/insights');
 app.use('/api/insights', insightsRoutes);
 
 // --- MISSÕES DAS COMUNIDADES ---
+const inviteRoutes = require('./routes/invites');
+app.use('/api/invites', inviteRoutes);
+// POST   /api/invites           → criar convite (Duo ou Rival) por link
+// DELETE /api/invites/:id       → cancelar convite
+// POST   /api/invites/preview   → ver o convite (token no corpo)
+// POST   /api/invites/accept    → aceitar o convite (token no corpo)
+
 const communityMissionRoutes = require('./routes/community-missions');
 app.use('/api/community-missions', communityMissionRoutes);
 // POST /api/messages            → enviar mensagem

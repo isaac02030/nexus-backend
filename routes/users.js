@@ -12,6 +12,7 @@ const { checkAdult } = require('../lib/adult-age');
 const { deleteAccountData } = require('../lib/account-deletion');
 const { isAdmin } = require('../lib/admin');
 const { lockedForSeconds, recordWrong, clearAttempts } = require('../lib/password-attempts');
+const { consumeBlockListRead, consumeBlockListDelete } = require('../lib/block-list-limit');
 const {
   NOTE_CONSENT_VERSION,
   NOTE_CONSENT_LOAD_ERROR,
@@ -518,6 +519,116 @@ router.put('/profile', auth, async (req, res) => {
 
   } catch (err) {
     res.status(500).json({ error: 'Erro ao atualizar perfil.' });
+  }
+});
+
+// ============================================
+// LISTA DE BLOQUEIOS E DESBLOQUEAR (migração 011, sem migração nova)
+// GET    /api/users/me/blocks
+// DELETE /api/users/me/blocks/:blockId
+//
+// A pessoa é sempre a do token. A lista só traz quem EU bloqueei
+// (blocker_id = eu), com o username atual, do mais recente ao mais
+// antigo, no máximo 100. Não devolve e-mail, bio, avatar, o id interno
+// de ninguém, nem se a outra pessoa também me bloqueou.
+//
+// Desbloquear apaga só a minha linha (id + blocker_id). Se a linha não
+// existe ou é de outra pessoa, a resposta é a mesma: 200 { unblocked: true }.
+// Não confirma se a linha alheia existe e não a apaga. O outro sentido,
+// se houver, continua impedindo um par novo.
+//
+// Id que não é inteiro positivo até 2147483647: 400, sem consultar o banco.
+// Sem a tabela da 011: 503. Outro erro de banco: 500 calmo, log só do código.
+//
+// Limite em memória (lib/block-list-limit.js), por pessoa: 30 leituras
+// por minuto e 10 desbloqueios por hora. Conta todo pedido autenticado,
+// antes da validação e do banco, para não furar a cota com id inválido.
+// Cache-Control: no-store em toda resposta destas rotas (também nos erros).
+// ============================================
+const BLOCK_LIST_LIMIT_MESSAGE = 'Você consultou a lista muitas vezes. Espere um minuto e tente de novo.';
+const BLOCK_DELETE_LIMIT_MESSAGE = 'Você pediu muitos desbloqueios nesta hora. Tente de novo mais tarde.';
+const BLOCK_ID_INVALID_MESSAGE = 'O identificador do bloqueio não é válido.';
+const BLOCK_LIST_UNAVAILABLE_MESSAGE = 'A lista de bloqueios ainda não está disponível. Tente de novo mais tarde.';
+const BLOCK_DELETE_UNAVAILABLE_MESSAGE = 'O desbloqueio ainda não está disponível. Tente de novo mais tarde.';
+const BLOCK_LIST_ERROR_MESSAGE = 'Não deu para carregar a lista agora. Tente de novo daqui a pouco.';
+const BLOCK_DELETE_ERROR_MESSAGE = 'Não deu para desbloquear agora. Tente de novo daqui a pouco.';
+
+function isMissingBlocksSchema(err) {
+  return !!(err && (err.code === '42703' || err.code === '42P01'));
+}
+
+function noStore(res) {
+  res.set('Cache-Control', 'no-store');
+  return res;
+}
+
+function tooManyBlocks(res, seconds, error) {
+  res.set('Retry-After', String(seconds));
+  return noStore(res).status(429).json({ error, code: 'too_many_requests' });
+}
+
+// Inteiro positivo que cabe num INTEGER do Postgres, sem zero à esquerda.
+function parseBlockId(value) {
+  if (typeof value !== 'string' || !/^[1-9]\d{0,9}$/.test(value)) return null;
+  const id = Number(value);
+  return Number.isInteger(id) && id <= 2147483647 ? id : null;
+}
+
+router.get('/me/blocks', auth, async (req, res) => {
+  const userId = Number(req.user.userId);
+  const slot = consumeBlockListRead(userId);
+  if (!slot.ok) return tooManyBlocks(res, slot.retryAfter, BLOCK_LIST_LIMIT_MESSAGE);
+
+  try {
+    const result = await db.query(
+      `SELECT b.id AS block_id, u.username, b.created_at
+       FROM user_blocks b
+       JOIN users u ON u.id = b.blocked_id
+       WHERE b.blocker_id = $1
+       ORDER BY b.created_at DESC, b.id DESC
+       LIMIT 100`,
+      [userId]
+    );
+    // Lista fechada: coluna a mais que a consulta trouxesse não sai.
+    const blocks = result.rows.map((row) => ({
+      block_id: row.block_id,
+      username: row.username,
+      created_at: row.created_at
+    }));
+    return noStore(res).json({ blocks });
+  } catch (err) {
+    if (isMissingBlocksSchema(err)) {
+      return noStore(res).status(503).json({ error: BLOCK_LIST_UNAVAILABLE_MESSAGE });
+    }
+    console.error('Block list error:', (err && (err.code || err.name)) || 'unknown');
+    return noStore(res).status(500).json({ error: BLOCK_LIST_ERROR_MESSAGE });
+  }
+});
+
+router.delete('/me/blocks/:blockId', auth, async (req, res) => {
+  const userId = Number(req.user.userId);
+  const slot = consumeBlockListDelete(userId);
+  if (!slot.ok) return tooManyBlocks(res, slot.retryAfter, BLOCK_DELETE_LIMIT_MESSAGE);
+
+  const blockId = parseBlockId(req.params.blockId);
+  if (!blockId) {
+    return noStore(res).status(400).json({ error: BLOCK_ID_INVALID_MESSAGE });
+  }
+
+  try {
+    // As duas condições juntas: id válido de outra pessoa não apaga nada.
+    await db.query(
+      `DELETE FROM user_blocks
+       WHERE id = $1 AND blocker_id = $2`,
+      [blockId, userId]
+    );
+    return noStore(res).json({ unblocked: true });
+  } catch (err) {
+    if (isMissingBlocksSchema(err)) {
+      return noStore(res).status(503).json({ error: BLOCK_DELETE_UNAVAILABLE_MESSAGE });
+    }
+    console.error('Block delete error:', (err && (err.code || err.name)) || 'unknown');
+    return noStore(res).status(500).json({ error: BLOCK_DELETE_ERROR_MESSAGE });
   }
 });
 

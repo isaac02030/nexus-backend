@@ -60,6 +60,9 @@ function getProofValidation(proofMode, note) {
   return null;
 }
 
+// Pontos do Rival (decisão de 26/11): 10 por dia cumprido, sem bônus.
+const { POINTS_PER_DAY, rivalPoints } = require('../lib/rival-points');
+
 function isDifficultDay(row) {
   return row.is_difficult === true;
 }
@@ -334,6 +337,8 @@ router.get('/:missionId/score', auth, async (req, res) => {
       myStreak = currentStreak(doneSet, currentDay, isMissionDay);
     }
 
+    const points = await pairPoints(mission, pair, partnerMissionId, partnerUserId);
+
     res.json({
       mission_id: mission.id,
       mode: mission.mode,
@@ -341,6 +346,12 @@ router.get('/:missionId/score', auth, async (req, res) => {
         [mission.user_name]:    scores[mission.user_id]    || 0,
         [mission.partner_name]: scores[mission.partner_id] || 0
       },
+      // Pontos do Rival (10 por dia cumprido), com as mesmas chaves de scores.
+      points: {
+        [mission.user_name]:    points.own,
+        [mission.partner_name]: points.partner
+      },
+      points_per_day: POINTS_PER_DAY,
       leader: getLeader(mission, scores),
       my_streak: myStreak
     });
@@ -348,6 +359,46 @@ router.get('/:missionId/score', auth, async (req, res) => {
     res.status(500).json({ error: 'Erro ao obter placar.' });
   }
 });
+
+// Pontos dos dois lados, só a partir do início do par: started_at do
+// mission_matches, ou pair_started_at no Duo/Rival da mesma missão (os dois
+// gravados com NOW() do banco). A comparação é feita no SQL, com o relógio
+// do banco. Par sem início conhecido: zero pontos (falha fechada). Sem par
+// (Solo): conta a missão inteira. Dia livre e falta não pontuam.
+async function pairPoints(mission, pair, partnerMissionId, partnerUserId) {
+  const paired = !!pair || (['parceiro', 'rival', 'duo'].includes(mission.mode) && mission.partner_id != null);
+  const since = pair ? pair.started_at : (paired ? mission.pair_started_at : null);
+  if (paired && !since) return { own: 0, partner: 0 };
+
+  const missionIds = pair ? [Number(mission.id), Number(partnerMissionId)] : [Number(mission.id)];
+  const rowsRes = await db.query(
+    `SELECT mission_id, user_id, day_number, completed
+     FROM checkins
+     WHERE mission_id = ANY($1::int[]) AND completed = true
+       AND ($2::timestamp IS NULL OR created_at >= $2::timestamp)`,
+    [missionIds, since || null]
+  );
+  const rowsOf = (missionId, userId) => rowsRes.rows.filter(
+    row => Number(row.mission_id) === Number(missionId) && sameId(row.user_id, userId)
+  );
+
+  const own = await missionDayContext(mission, mission.user_id);
+  const ownPoints = rivalPoints(rowsOf(mission.id, mission.user_id), own.isMissionDay);
+  if (!paired || partnerUserId == null) return { own: ownPoints, partner: 0 };
+
+  let partnerMission = mission;
+  if (pair) {
+    const partnerRes = await db.query(
+      'SELECT id, started_at, mission_weekdays FROM missions WHERE id = $1',
+      [partnerMissionId]
+    );
+    partnerMission = partnerRes.rows[0] || null;
+  }
+  if (!partnerMission) return { own: ownPoints, partner: 0 };
+  const other = await missionDayContext(partnerMission, partnerUserId);
+  const partnerPoints = rivalPoints(rowsOf(partnerMission.id, partnerUserId), other.isMissionDay);
+  return { own: ownPoints, partner: partnerPoints };
+}
 
 async function updateScore(mission, userId, executor) {
   const field = Number(mission.user_id) === Number(userId) ? 'user_score' : 'partner_score';

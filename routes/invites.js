@@ -21,7 +21,8 @@
 // vencido (7 dias, relógio do banco) ou cancelado; não vale estando já num
 // par ativo; não vale entre quem se bloqueou (user_blocks, migração 011).
 // Dois aceites ao mesmo tempo: a linha do convite é travada (FOR UPDATE) e
-// só o primeiro passa.
+// só o primeiro passa. Travas sempre na mesma ordem nas duas rotas:
+// convite → missão (o aceite trava antes a pessoa, que a criação não trava).
 // Antes da migração 012: 503 calmo e nada muda. Nada do pedido vai para log.
 // ============================================
 
@@ -110,6 +111,22 @@ router.post('/', auth, async (req, res) => {
     if (!(await adultOr403(userId, res))) return;
     client = await db.connect();
     await client.query('BEGIN');
+    // Ordem das travas igual à do aceite: primeiro o convite, depois a missão
+    // (achado do Argos no PR 38; ordens diferentes podiam dar deadlock).
+    const ownerRes = await client.query(
+      'SELECT id FROM missions WHERE id = $1 AND user_id = $2',
+      [missionId, userId]
+    );
+    if (!ownerRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: MSG.missionNotFound });
+    }
+    await client.query(
+      `SELECT id FROM mission_invites
+       WHERE mission_id = $1 AND used_at IS NULL AND canceled_at IS NULL
+       FOR UPDATE`,
+      [missionId]
+    );
     // Só o dono, e só numa missão Solo ativa sem par.
     const missionRes = await client.query(
       `SELECT m.id, m.user_id, m.status, m.mode, ${PAIRED_SQL} AS paired

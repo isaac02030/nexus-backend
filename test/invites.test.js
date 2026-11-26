@@ -59,8 +59,11 @@ const inviteView = (i) => ({ ...i, expired: i.expires_at.getTime() <= Date.now()
 function connection() {
   const held = new Set();
   let undo = [];
+  // Espera a trava; se esperar demais, é deadlock (como o 40P01 do Postgres).
   const lock = async (key) => {
+    const start = Date.now();
     while (db.locks.has(key) && db.locks.get(key) !== held) {
+      if (Date.now() - start > 300) throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
     db.locks.set(key, held);
@@ -95,13 +98,25 @@ function connection() {
     if (/^SELECT id FROM users WHERE id = \$1 FOR UPDATE$/.test(text)) { await lock(`user:${params[0]}`); return { rows: [{ id: params[0] }] }; }
 
     // Criar
+    if (/^SELECT id FROM missions WHERE id = \$1 AND user_id = \$2$/.test(text)) {
+      const m = mission(params[0]);
+      return { rows: m && m.user_id === Number(params[1]) ? [{ id: m.id }] : [] };
+    }
+    if (/^SELECT id FROM mission_invites WHERE mission_id = \$1 AND used_at IS NULL AND canceled_at IS NULL FOR UPDATE$/.test(text)) {
+      const open = db.invites.filter((i) => i.mission_id === Number(params[0]) && !i.used_at && !i.canceled_at);
+      for (const i of open) await lock(`invite:${i.id}`);
+      return { rows: open.map((i) => ({ id: i.id })) };
+    }
     if (/^SELECT m\.id, m\.user_id, m\.status, m\.mode, .* FROM missions m WHERE m\.id = \$1 AND m\.user_id = \$2 FOR UPDATE$/.test(text)) {
       await lock(`mission:${params[0]}`);
       const m = mission(params[0]);
       return { rows: m && m.user_id === Number(params[1]) ? [{ ...m, paired: paired(m) }] : [] };
     }
     if (/^UPDATE mission_invites SET canceled_at = NOW\(\) WHERE mission_id = \$1/.test(text)) {
-      db.invites.filter((i) => i.mission_id === Number(params[0]) && !i.used_at && !i.canceled_at).forEach((i) => change(i, { canceled_at: new Date() }));
+      // UPDATE também trava as linhas, como no Postgres.
+      const open = db.invites.filter((i) => i.mission_id === Number(params[0]) && !i.used_at && !i.canceled_at);
+      for (const i of open) await lock(`invite:${i.id}`);
+      open.filter((i) => !i.used_at && !i.canceled_at).forEach((i) => change(i, { canceled_at: new Date() }));
       return { rows: [] };
     }
     if (/^INSERT INTO mission_invites/.test(text)) {
@@ -374,6 +389,30 @@ describe('convite por link (Duo e Rival)', { concurrency: 1 }, () => {
     assert.equal(no.length, 1);
     assert.ok([2, 7].includes(mission(100).partner_id));
     assert.equal(db.invites[0].used_by, mission(100).partner_id);
+  });
+
+  test('negado: criar um convite novo e aceitar o antigo ao mesmo tempo não dá deadlock nem 500', async () => {
+    // Várias defasagens: o aceite sai antes e a criação entra no meio dele.
+    for (const atraso of [0, 2, 4, 6, 8, 10, 12]) {
+      resetDb();
+      const { body } = await create(1);
+      db.slow = 3;
+      const aceitePromessa = accept(2, body.token);
+      await new Promise((resolve) => setTimeout(resolve, atraso));
+      const [novo, aceite] = await Promise.all([create(1, 100, 'rival'), aceitePromessa]);
+      db.slow = 0;
+      assert.notEqual(novo.status, 500, `criar: ${JSON.stringify(novo.body)}`);
+      assert.notEqual(aceite.status, 500, `aceitar: ${JSON.stringify(aceite.body)}`);
+      // Um dos dois chega primeiro; o estado final é coerente.
+      if (aceite.status === 200) {
+        assert.equal(novo.status, 409, 'a missão virou Duo: não dá mais para convidar');
+        assert.equal(mission(100).partner_id, 2);
+      } else {
+        assert.equal(aceite.status, 410, 'o convite antigo foi cancelado pelo novo');
+        assert.equal(novo.status, 201);
+        assert.equal(mission(100).partner_id, null);
+      }
+    }
   });
 
   // ---------- Ver e cancelar ----------

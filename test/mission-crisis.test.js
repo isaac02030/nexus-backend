@@ -14,7 +14,7 @@ process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
 
 const missionsRouter = require('../routes/missions');
-const { MISSION_TEXT_FIELDS } = missionsRouter;
+const { MISSION_TEXT_FIELDS, MISSION_LEVELS, PROOF_MODES } = missionsRouter;
 
 const MESSAGE = 'A missão não foi criada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
 const ALTO = 'quero me matar';
@@ -114,8 +114,50 @@ describe('filtro de crise no contrato e na missão', { concurrency: 1 }, () => {
     assert.equal(res.body.crisis, true);
   });
 
+  test('negado: nível fora da lista: 400, nada gravado', async () => {
+    for (const level of ['mestre', 'Iniciante', '', 3, 'quero desistir', { a: 1 }]) {
+      const res = await create({ ...BASE, level });
+      assert.equal(res.status, 400, JSON.stringify(level));
+      assert.equal(res.body.code, 'invalid_level');
+      assert.equal(res.body.error, 'Escolha um nível da lista.');
+    }
+    assert.equal(state.inserts.length, 0);
+  });
+
+  test('negado: modo de prova fora da lista: 400, nada gravado', async () => {
+    for (const proof of ['foto', 'SELF_REPORT', '', 1, ['study_note']]) {
+      const res = await create({ ...BASE, proof_mode: proof });
+      assert.equal(res.status, 400, JSON.stringify(proof));
+      assert.equal(res.body.code, 'invalid_proof_mode');
+      assert.equal(res.body.error, 'Escolha um modo de prova da lista.');
+    }
+    assert.equal(state.inserts.length, 0);
+  });
+
+  test('os valores que o site novo e o app antigo mandam passam', async () => {
+    for (const level of MISSION_LEVELS) {
+      state.inserts = [];
+      assert.equal((await create({ ...BASE, level })).status, 201, level);
+    }
+    for (const proof of PROOF_MODES) {
+      state.inserts = [];
+      assert.equal((await create({ ...BASE, proof_mode: proof })).status, 201, proof);
+    }
+    // nexus-v2 (onboarding.js) manda study_note ou workout_proof, sem nível.
+    assert.ok(PROOF_MODES.includes('study_note') && PROOF_MODES.includes('workout_proof'));
+  });
+
+  test('negado: texto de crise no nível: recusado pela lista fechada, nada gravado nem enviado ao banco', async () => {
+    // level e proof_mode não passam pelo filtro: são lista fechada, e um
+    // texto qualquer ali nunca é gravado.
+    const res = await create({ ...BASE, level: ALTO });
+    assert.equal(res.status, 400);
+    assert.equal(state.inserts.length, 0);
+    assert.equal(reached('matar'), false);
+  });
+
   test('contrato comum cria; campos que não são texto não quebram o filtro', async () => {
-    const res = await create({ ...BASE, level: 3, mission_weekdays: [1, 2, 3] });
+    const res = await create({ ...BASE, mission_weekdays: [1, 2, 3] });
     assert.equal(res.status, 201);
     assert.equal(res.body.crisis, undefined);
     assert.equal(state.inserts.length, 1);
@@ -131,8 +173,12 @@ describe('filtro de crise no contrato e na missão', { concurrency: 1 }, () => {
     await create(BASE);
     const text = state.inserts[0].text;
     const columns = text.slice(text.indexOf('(') + 1, text.indexOf(')')).split(',').map((c) => c.trim());
-    // Colunas que não são texto livre de quem escreve (ids, escolhas de uma lista).
-    const notFreeText = ['user_id', 'level', 'mode', 'match_preference', 'proof_mode', 'mission_weekdays', 'area'];
+    // Isentas só as colunas que NÃO recebem texto livre: o id de quem cria,
+    // o modo (literal 'solo' no SQL) e as de lista fechada validada antes do
+    // INSERT (preferência de par, nível, prova, dias e área). Cada lista
+    // fechada tem teste de recusa (400).
+    const notFreeText = ['user_id', 'mode', 'match_preference', 'level', 'proof_mode', 'mission_weekdays', 'area'];
+    assert.match(text, /VALUES \(\$1, \$2, \$3, \$4, 'solo',/, 'o modo é literal');
     for (const c of columns) {
       if (notFreeText.includes(c)) continue;
       assert.ok(MISSION_TEXT_FIELDS.includes(c), `${c} não passa pelo filtro de crise`);

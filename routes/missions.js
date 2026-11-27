@@ -20,6 +20,14 @@ const MISSION_TEXT_FIELDS = Object.freeze([
   'fallback_plan', 'study_focus', 'study_current_stage', 'study_target_outcome', 'subject'
 ]);
 
+// Nível e modo de prova: listas fechadas (os valores do site novo e do app
+// antigo; o servidor já entende estes, em missionLevelRank e na prova do
+// check-in). Fora da lista: 400. Sem o campo: o padrão de sempre.
+const MISSION_LEVELS = Object.freeze(['iniciante', 'intermedio', 'intermediario', 'avancado']);
+const PROOF_MODES = Object.freeze(['self_report', 'text_note', 'workout_proof', 'study_note', 'artifact_note']);
+const LEVEL_INVALID_MESSAGE = 'Escolha um nível da lista.';
+const PROOF_INVALID_MESSAGE = 'Escolha um modo de prova da lista.';
+
 function missionCrisisLevel(body) {
   if (!body || typeof body !== 'object') return null;
   let level = null;
@@ -204,6 +212,12 @@ router.post('/', auth, async (req, res) => {
   const weekdays = validateMissionWeekdays(mission_weekdays);
   if (!weekdays.ok) {
     return res.status(400).json({ error: weekdays.error });
+  }
+  if (level != null && !MISSION_LEVELS.includes(level)) {
+    return res.status(400).json({ error: LEVEL_INVALID_MESSAGE, code: 'invalid_level' });
+  }
+  if (proof_mode != null && !PROOF_MODES.includes(proof_mode)) {
+    return res.status(400).json({ error: PROOF_INVALID_MESSAGE, code: 'invalid_proof_mode' });
   }
 
   // Área (mente, corpo ou rotina) e assunto (migração 013). Opcionais por
@@ -720,6 +734,8 @@ async function tryMatchMission(currentMission, currentUserId, pool) {
 
 module.exports = router;
 module.exports.MISSION_TEXT_FIELDS = MISSION_TEXT_FIELDS;
+module.exports.MISSION_LEVELS = MISSION_LEVELS;
+module.exports.PROOF_MODES = PROOF_MODES;
 // Usadas pelo bloqueio do chat (routes/messages.js) e pelos testes.
 module.exports.endLinkedMissionMatch = endLinkedMissionMatch;
 module.exports.endMatchInTransaction = endMatchInTransaction;

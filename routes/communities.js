@@ -646,7 +646,8 @@ router.get('/:slug', auth, async (req, res) => {
         `SELECT cp.id, cp.community_id, cp.user_id, cp.content, cp.created_at,
                 u.username,
                 (to_jsonb(cp) ->> 'hidden_at') IS NOT NULL AS hidden,
-                CASE WHEN cp.user_id = $2 THEN to_jsonb(cp) ->> 'hidden_reason' END AS hidden_reason
+                CASE WHEN cp.user_id = $2 THEN to_jsonb(cp) ->> 'hidden_reason' END AS hidden_reason,
+                ${meritCountSql('cp.user_id')} AS author_missions
          FROM community_posts cp
          JOIN users u ON cp.user_id = u.id
          WHERE cp.community_id = $1
@@ -655,7 +656,11 @@ router.get('/:slug', auth, async (req, res) => {
          LIMIT 20`,
         [community.id, userId]
       );
-      posts = postsRes.rows.map((post) => {
+      // O título do autor (PR D): só o nome e o nível, calculados na leitura.
+      posts = postsRes.rows.map(({ author_missions: authorMissions, ...row }) => ({
+        ...row,
+        author_title: titleFor(authorMissions)
+      })).map((post) => {
         if (!post.hidden) {
           const { hidden_reason: _, ...visible } = post;
           return visible;

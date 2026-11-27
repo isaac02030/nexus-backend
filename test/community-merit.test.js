@@ -57,6 +57,7 @@ function resetDb() {
   db.missions = new Map([[5, 4]]);
   db.rankingRows = [];
   db.communities = [{ id: 3, slug: 'foco' }];
+  db.postRows = [];
 }
 
 function handle(sql, params = []) {
@@ -72,6 +73,12 @@ function handle(sql, params = []) {
     return { rows: db.communities.filter((c) => c.slug === params[0]) };
   }
   if (/^WITH members AS/.test(text)) return { rows: db.rankingRows };
+  if (/^SELECT c\.\*, CASE WHEN cm\.user_id IS NOT NULL/.test(text) && /WHERE c\.slug = \$2$/.test(text)) {
+    return { rows: db.communities.filter((c) => c.slug === params[1]).map((c) => ({ ...c, is_member: false, missions_done: 0, total_days: 0 })) };
+  }
+  if (/FROM community_posts cp JOIN users u ON cp\.user_id = u\.id WHERE cp\.community_id = \$1/.test(text)) {
+    return { rows: db.postRows || [] };
+  }
   return { rows: [] };
 }
 
@@ -177,6 +184,20 @@ describe('rotas de mérito e ranking', { concurrency: 1 }, () => {
   test('a página da comunidade usa o mesmo ranking (3 + eu), não mais os 10 com patente antiga', async () => {
     await call('/api/communities/foco');
     assert.equal(db.queries.some((q) => /ORDER BY cm\.missions_done DESC, cm\.total_days DESC/.test(q.text)), false);
+  });
+
+  test('posts da página trazem o título do autor, sem o número cru nem outro dado', async () => {
+    db.postRows = [
+      { id: 1, community_id: 3, user_id: 8, content: 'oi', created_at: '2026-11-27', username: 'ana', hidden: false, hidden_reason: null, author_missions: 6 },
+      { id: 2, community_id: 3, user_id: 9, content: 'oi', created_at: '2026-11-27', username: 'novo', hidden: false, hidden_reason: null, author_missions: 0 }
+    ];
+    const res = await call('/api/communities/foco');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.posts[0].author_title, { name: 'Constante', level: 3, marks: 5 });
+    assert.equal(res.body.posts[1].author_title, null);
+    for (const p of res.body.posts) assert.equal(p.author_missions, undefined);
+    const q = db.queries.find((item) => /FROM community_posts cp JOIN users u/.test(item.text));
+    assert.match(q.text, /\(mm\.user_id = cp\.user_id OR mm\.partner_id = cp\.user_id\) AND mm\.status = 'completed' AND mm\.duration_days >= 30\) AS author_missions/);
   });
 
   test('/merit/me vem antes de /:slug; "merit" é nome reservado', () => {

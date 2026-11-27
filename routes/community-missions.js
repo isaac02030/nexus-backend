@@ -57,6 +57,7 @@ const T = {
   ended: 'Esta maratona já terminou.',
   full: 'Esta maratona já está cheia.',
   notParticipant: 'Entre na maratona para registrar o dia.',
+  notMemberCheckin: 'Entre na comunidade para registrar o dia na maratona.',
   notStarted: 'A maratona ainda não começou. O registro abre no primeiro dia.',
   alreadyDone: 'Você já registrou o dia de hoje na maratona.',
   done: 'Dia registrado na maratona.',
@@ -351,6 +352,9 @@ router.post('/:slug/:missionId/join', auth, async (req, res) => {
     const community = await findCommunity(req.params.slug, userId);
     if (!community) return res.status(404).json({ error: T.notFound });
     if (!community.is_member) return res.status(403).json({ error: T.notMemberJoin, code: 'not_member' });
+    if (isReadOnlyCommunity(community.slug)) {
+      return res.status(403).json({ error: READ_ONLY_MESSAGE, code: 'read_only' });
+    }
 
     // A maratona travada: dois pedidos ao mesmo tempo não passam do limite.
     client = await db.connect();
@@ -396,7 +400,10 @@ router.post('/:slug/:missionId/join', auth, async (req, res) => {
 // ============================================
 // REGISTRAR O DIA NA MARATONA
 // POST /api/community-missions/:slug/:missionId/checkin
-// Só participante, só dentro do período (em Lisboa), um por dia.
+// Só quem ainda é membro da comunidade e participa, só em comunidade que não
+// é só leitura, só dentro do período (em Lisboa), um por dia.
+// O dia (data e número) sai do MESMO SQL do registro: na virada da meia-noite
+// de Lisboa os dois não divergem, e fora do período nada é gravado.
 // Sem texto: nada para o filtro de crise guardar.
 // ============================================
 router.post('/:slug/:missionId/checkin', auth, async (req, res) => {
@@ -407,6 +414,11 @@ router.post('/:slug/:missionId/checkin', auth, async (req, res) => {
   try {
     const community = await findCommunity(req.params.slug, userId);
     if (!community) return res.status(404).json({ error: T.notFound });
+    // Quem saiu da comunidade não registra, mesmo que ainda conste na maratona.
+    if (!community.is_member) return res.status(403).json({ error: T.notMemberCheckin, code: 'not_member' });
+    if (isReadOnlyCommunity(community.slug)) {
+      return res.status(403).json({ error: READ_ONLY_MESSAGE, code: 'read_only' });
+    }
     const m = await findMarathon(missionId, community.id, userId);
     if (!m) return res.status(404).json({ error: T.notFound });
     if (!m.is_participant) return res.status(403).json({ error: T.notParticipant, code: 'not_participant' });
@@ -416,21 +428,32 @@ router.post('/:slug/:missionId/checkin', auth, async (req, res) => {
 
     client = await db.connect();
     await client.query('BEGIN');
-    // UNIQUE (maratona, pessoa, dia): o segundo registro do dia não grava.
+    // Data e número do dia no mesmo SQL, com o período conferido de novo
+    // (relógio do banco). UNIQUE (maratona, pessoa, dia): o segundo não grava.
     const inserted = await client.query(
       `INSERT INTO community_marathon_checkins (community_mission_id, user_id, day_date, day_number)
-       VALUES ($1, $2, ${TODAY_SQL}, $3)
+       SELECT cm.id, $2, t.today, (t.today - cm.start_day + 1)
+       FROM community_missions cm
+       CROSS JOIN (SELECT ${TODAY_SQL} AS today) t
+       WHERE cm.id = $1
+         AND t.today BETWEEN cm.start_day AND cm.start_day + cm.duration_days - 1
        ON CONFLICT (community_mission_id, user_id, day_date) DO NOTHING
-       RETURNING id`,
-      [m.id, userId, Number(m.day_number)]
+       RETURNING day_number`,
+      [m.id, userId]
     );
     if (inserted.rowCount !== 1) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: T.alreadyDone, code: 'already_done', day: Number(m.day_number) });
+      // Já registrou hoje, ou o período virou entre a leitura e o registro.
+      const again = await findMarathon(m.id, community.id, userId);
+      const now = again ? phase(again) : 'ended';
+      if (now === 'upcoming') return res.status(409).json({ error: T.notStarted, code: 'not_started' });
+      if (now === 'ended') return res.status(409).json({ error: T.ended, code: 'ended' });
+      return res.status(409).json({ error: T.alreadyDone, code: 'already_done', day: Number(again.day_number) });
     }
-    await onMarathonDayDone(client, { userId, marathonId: m.id, day: Number(m.day_number) });
+    const day = Number(inserted.rows[0].day_number);
+    await onMarathonDayDone(client, { userId, marathonId: m.id, day });
     await client.query('COMMIT');
-    res.status(201).json({ done: true, day: Number(m.day_number), message: T.done });
+    res.status(201).json({ done: true, day, message: T.done });
   } catch (err) {
     if (client) {
       try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }

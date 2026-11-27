@@ -37,6 +37,7 @@ function reset() {
   st.marathon = { id: 40, title: 'Ler 7 dias', description: 'Uma página', duration_days: 7, max_participants: 3, day_number: 2, participants: new Set([1]) };
   st.checkins = new Set();               // `${user}`: registro de hoje
   st.before017 = false;
+  st.dayAtInsert = null;
   st.personal = { id: 11, user_id: 1, partner_id: null, status: 'active', mode: 'solo', proof_mode: 'self_report', started_at: new Date().toISOString(), duration_days: 30 };
 }
 
@@ -70,9 +71,13 @@ function handle(sql, params = []) {
   if (/^INSERT INTO community_marathon_checkins/.test(text)) {
     if (st.before017) throw Object.assign(new Error('relation does not exist'), { code: '42P01' });
     const key = String(params[1]);
+    // dayAtInsert: o relógio virou entre a leitura e o registro.
+    if (st.dayAtInsert != null) st.marathon.day_number = st.dayAtInsert;
+    const day = Number(st.marathon.day_number);
+    if (day < 1 || day > st.marathon.duration_days) return { rows: [], rowCount: 0 };
     if (st.checkins.has(key)) return { rows: [], rowCount: 0 };
     st.checkins.add(key);
-    return { rows: [{ id: st.checkins.size }], rowCount: 1 };
+    return { rows: [{ day_number: day }], rowCount: 1 };
   }
   if (/^INSERT INTO community_missions/.test(text)) {
     return { rows: [{ id: 41, title: params[1], description: params[2], duration_days: params[3], max_participants: params[4], start_day: '2026-11-27' }], rowCount: 1 };
@@ -225,8 +230,11 @@ describe('Maratona da comunidade', { concurrency: 1 }, () => {
     assert.ok(wrote('community_marathon_checkins'));
     assert.equal(wrote('checkins'), false);
     const q = st.queries.find((item) => /^INSERT INTO community_marathon_checkins/.test(item.text));
-    assert.match(q.text, /VALUES \(\$1, \$2, \(NOW\(\) AT TIME ZONE 'Europe\/Lisbon'\)::date, \$3\)/);
-    assert.match(q.text, /ON CONFLICT \(community_mission_id, user_id, day_date\) DO NOTHING/);
+    // Data e número do dia no MESMO SQL (não divergem na meia-noite de Lisboa).
+    assert.match(q.text, /SELECT cm\.id, \$2, t\.today, \(t\.today - cm\.start_day \+ 1\) FROM community_missions cm CROSS JOIN \(SELECT \(NOW\(\) AT TIME ZONE 'Europe\/Lisbon'\)::date AS today\) t/);
+    assert.match(q.text, /AND t\.today BETWEEN cm\.start_day AND cm\.start_day \+ cm\.duration_days - 1/);
+    assert.match(q.text, /ON CONFLICT \(community_mission_id, user_id, day_date\) DO NOTHING RETURNING day_number$/);
+    assert.deepEqual(q.params, [40, 1]);
   });
 
   test('negado: registrar duas vezes no mesmo dia: 409, nada novo', async () => {
@@ -260,6 +268,42 @@ describe('Maratona da comunidade', { concurrency: 1 }, () => {
     assert.equal(wrote('community_marathon_checkins'), false);
   });
 
+  test('negado: quem saiu da comunidade não registra, mesmo constando na maratona', async () => {
+    st.members.delete(1);
+    const res = await call('POST', '/api/community-missions/foco/40/checkin');
+    assert.equal(res.status, 403);
+    assert.equal(res.body.code, 'not_member');
+    assert.equal(res.body.error, 'Entre na comunidade para registrar o dia na maratona.');
+    assert.equal(wrote('community_marathon_checkins'), false);
+  });
+
+  test('negado: comunidade só leitura: não registra nem entra', async () => {
+    const access = require('../lib/community-access');
+    access.READ_ONLY_COMMUNITY_SLUGS.push('foco');
+    try {
+      const checkin = await call('POST', '/api/community-missions/foco/40/checkin');
+      assert.equal(checkin.status, 403);
+      assert.equal(checkin.body.code, 'read_only');
+      const join = await call('POST', '/api/community-missions/foco/40/join', { token: tokenFor(2) });
+      assert.equal(join.status, 403);
+      assert.equal(join.body.code, 'read_only');
+      assert.equal(wrote('community_marathon_checkins'), false);
+      assert.equal(wrote('community_mission_participants'), false);
+    } finally {
+      access.READ_ONLY_COMMUNITY_SLUGS.splice(access.READ_ONLY_COMMUNITY_SLUGS.indexOf('foco'), 1);
+    }
+  });
+
+  test('a virada do período entre a leitura e o registro: nada gravado, resposta certa', async () => {
+    // A leitura diz dia 7 (o último); quando o registro roda, já é o dia 8.
+    st.marathon.day_number = 7;
+    st.dayAtInsert = 8;
+    const res = await call('POST', '/api/community-missions/foco/40/checkin');
+    assert.equal(res.status, 409);
+    assert.equal(res.body.code, 'ended');
+    assert.equal(st.checkins.size, 0);
+  });
+
   test('antes da 017: 503 calmo (listar, ver, registrar)', async () => {
     st.before017 = true;
     for (const [m, p] of [['GET', '/api/community-missions/foco'], ['GET', '/api/community-missions/foco/40'], ['POST', '/api/community-missions/foco/40/checkin']]) {
@@ -282,16 +326,22 @@ describe('Maratona da comunidade', { concurrency: 1 }, () => {
   });
 
   test('negado: sem login 401; sem 18+ 403 em todas as rotas, nada gravado', async () => {
+    // Inclui as rotas antigas (ranking e scope), como no teste removido.
     const calls = [
       ['GET', '/api/community-missions/foco'],
       ['POST', '/api/community-missions/foco', GOOD],
       ['GET', '/api/community-missions/foco/40'],
       ['POST', '/api/community-missions/foco/40/join'],
-      ['POST', '/api/community-missions/foco/40/checkin']
+      ['POST', '/api/community-missions/foco/40/checkin'],
+      ['GET', '/api/community-missions/foco/40/ranking'],
+      ['GET', '/api/community-missions/foco/scope/mundial']
     ];
+    st.queries = [];
     for (const [m, p, body] of calls) {
       assert.equal((await call(m, p, { token: null, body })).status, 401, `${m} ${p}`);
     }
+    // Sem login: 401 antes do portão, sem nenhuma consulta ao banco.
+    assert.equal(st.queries.length, 0);
     st.notAdult.add(1);
     for (const [m, p, body] of calls) {
       const res = await call(m, p, { body });
@@ -300,6 +350,10 @@ describe('Maratona da comunidade', { concurrency: 1 }, () => {
     }
     assert.equal(wrote('community_marathon_checkins'), false);
     assert.equal(wrote('community_missions'), false);
+    assert.equal(wrote('community_mission_participants'), false);
+    assert.equal(wrote('checkins'), false);
+    // Com 18+ negado, só a pergunta da idade chegou ao banco.
+    assert.ok(st.queries.every((q) => /adult_confirmed FROM users/.test(q.text)));
   });
 
   test('a Maratona não conta para o título (o mérito só lê missions)', () => {

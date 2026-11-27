@@ -39,7 +39,7 @@ describe('títulos (opção A)', () => {
   test('o que conta: só missões pessoais, concluídas, de 30 dias ou mais (dono ou parceiro)', () => {
     const sql = normalize(merit.meritCountSql('cm.user_id'));
     assert.match(sql, /^\(SELECT COUNT\(\*\)::int FROM missions mm /);
-    assert.match(sql, /\(mm\.user_id = cm\.user_id OR mm\.partner_id = cm\.user_id\)/);
+    assert.match(sql, /\(mm\.user_id = cm\.user_id OR \(mm\.partner_id = cm\.user_id AND COALESCE\(mm\.mode, ''\) <> 'rival' AND NOT EXISTS \( SELECT 1 FROM mission_matches mx WHERE mx\.mission_a_id = mm\.id OR mx\.mission_b_id = mm\.id \)\)\)/);
     assert.match(sql, /mm\.status = 'completed'/);
     assert.match(sql, /mm\.duration_days >= 30\)$/);
     // A Maratona vive em community_missions: fora da conta.
@@ -148,7 +148,9 @@ describe('rotas de mérito e ranking', { concurrency: 1 }, () => {
   test('o SQL do ranking: só membros, só quem tem missão que conta, desempate pela entrada e pelo id', async () => {
     await call('/api/communities/foco/ranking');
     const q = db.queries.find((item) => /^WITH members AS/.test(item.text));
-    assert.match(q.text, /FROM community_members cm JOIN users u ON u\.id = cm\.user_id WHERE cm\.community_id = \$1/);
+    assert.match(q.text, /FROM community_members cm JOIN users u ON u\.id = cm\.user_id LEFT JOIN missions mm ON \(mm\.user_id = cm\.user_id OR \(mm\.partner_id = cm\.user_id AND COALESCE\(mm\.mode, ''\) <> 'rival'/);
+    assert.match(q.text, /WHERE cm\.community_id = \$1 GROUP BY cm\.id, cm\.user_id, cm\.created_at, u\.username/);
+    assert.doesNotMatch(q.text, /SELECT COUNT\(\*\)::int FROM missions mm/);
     assert.match(q.text, /WHERE missions > 0/);
     assert.match(q.text, /ROW_NUMBER\(\) OVER \(ORDER BY missions DESC, joined_at ASC, member_id ASC\)/);
     assert.match(q.text, /WHERE position <= \$3 OR user_id = \$2 ORDER BY position$/);
@@ -197,7 +199,8 @@ describe('rotas de mérito e ranking', { concurrency: 1 }, () => {
     assert.equal(res.body.posts[1].author_title, null);
     for (const p of res.body.posts) assert.equal(p.author_missions, undefined);
     const q = db.queries.find((item) => /FROM community_posts cp JOIN users u/.test(item.text));
-    assert.match(q.text, /\(mm\.user_id = cp\.user_id OR mm\.partner_id = cp\.user_id\) AND mm\.status = 'completed' AND mm\.duration_days >= 30\) AS author_missions/);
+    assert.match(q.text, /\(mm\.user_id = cp\.user_id OR \(mm\.partner_id = cp\.user_id AND COALESCE\(mm\.mode, ''\) <> 'rival'/);
+    assert.match(q.text, /AND mm\.status = 'completed' AND mm\.duration_days >= 30\) AS author_missions/);
   });
 
   test('/merit/me vem antes de /:slug; "merit" é nome reservado', () => {

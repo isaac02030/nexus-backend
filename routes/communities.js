@@ -14,7 +14,7 @@ const {
   postAccess, rankBySubject, areaLabel, isValidArea, AREA_INVALID_MESSAGE,
   isReadOnlyCommunity, READ_ONLY_MESSAGE, isEmojiIcon
 } = require('../lib/community-access');
-const { MERIT_RULE, meritCountSql, titleFor, nextTitle } = require('../lib/merit');
+const { MERIT_RULE, meritCountSql, meritConditionSql, titleFor, nextTitle } = require('../lib/merit');
 const {
   URGENT_REASON,
   FAST_TRACK_PER_DAY,
@@ -576,11 +576,15 @@ router.get('/merit/me', auth, async (req, res) => {
 async function communityRanking(communityId, userId) {
   const result = await db.query(
     `WITH members AS (
+       -- Uma contagem agregada para todos os membros (não uma subconsulta
+       -- por linha).
        SELECT cm.id AS member_id, cm.user_id, cm.created_at AS joined_at, u.username,
-              ${meritCountSql('cm.user_id')} AS missions
+              COUNT(mm.id)::int AS missions
        FROM community_members cm
        JOIN users u ON u.id = cm.user_id
+       LEFT JOIN missions mm ON ${meritConditionSql('cm.user_id')}
        WHERE cm.community_id = $1
+       GROUP BY cm.id, cm.user_id, cm.created_at, u.username
      ), ordered AS (
        SELECT member_id, user_id, joined_at, username, missions,
               ROW_NUMBER() OVER (ORDER BY missions DESC, joined_at ASC, member_id ASC) AS position

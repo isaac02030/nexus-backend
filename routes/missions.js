@@ -10,10 +10,27 @@ const { validateMissionWeekdays } = require('../lib/mission-days');
 const { parseArea, parseSubject } = require('../lib/community-access');
 const { classifyNote } = require('../lib/crisis-filter');
 
-// O assunto (PR 40) é texto livre que fica no banco: passa pelo filtro de
-// crise antes de tudo. Com alerta, a missão não é criada (texto para o sim
-// do dono do projeto).
+// Todo texto livre do contrato e da missão fica no banco e passa pelo filtro
+// de crise antes de tudo (decisão de 27/11; antes, só o assunto do PR 45).
+// Com alerta em qualquer campo, a missão não é criada, nada é gravado e o
+// texto não vai para log; vale o nível mais alto entre os campos.
 const MISSION_CRISIS_MESSAGE = 'A missão não foi criada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
+const MISSION_TEXT_FIELDS = Object.freeze([
+  'title', 'category', 'description', 'daily_minimum', 'commitment_window', 'why_it_matters',
+  'fallback_plan', 'study_focus', 'study_current_stage', 'study_target_outcome', 'subject'
+]);
+
+function missionCrisisLevel(body) {
+  if (!body || typeof body !== 'object') return null;
+  let level = null;
+  for (const field of MISSION_TEXT_FIELDS) {
+    if (typeof body[field] !== 'string') continue;
+    const found = classifyNote(body[field]);
+    if (found === 'alto') return 'alto';
+    if (found) level = found;
+  }
+  return level;
+}
 const router = express.Router();
 
 let missionParticipantHealingReady = false;
@@ -168,12 +185,12 @@ router.post('/', auth, async (req, res) => {
   } = req.body;
   const userId = req.user.userId;
 
-  const subjectCrisis = typeof subject === 'string' ? classifyNote(subject) : null;
-  if (subjectCrisis) {
+  const crisisLevel = missionCrisisLevel(req.body);
+  if (crisisLevel) {
     return res.status(200).json({
       saved: false,
       crisis: true,
-      crisis_level: subjectCrisis,
+      crisis_level: crisisLevel,
       message: MISSION_CRISIS_MESSAGE
     });
   }
@@ -702,6 +719,7 @@ async function tryMatchMission(currentMission, currentUserId, pool) {
 }
 
 module.exports = router;
+module.exports.MISSION_TEXT_FIELDS = MISSION_TEXT_FIELDS;
 // Usadas pelo bloqueio do chat (routes/messages.js) e pelos testes.
 module.exports.endLinkedMissionMatch = endLinkedMissionMatch;
 module.exports.endMatchInTransaction = endMatchInTransaction;

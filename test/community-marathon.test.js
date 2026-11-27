@@ -38,6 +38,7 @@ function reset() {
   st.checkins = new Set();               // `${user}`: registro de hoje
   st.before017 = false;
   st.dayAtInsert = null;
+  st.openByMe = 0;
   st.personal = { id: 11, user_id: 1, partner_id: null, status: 'active', mode: 'solo', proof_mode: 'self_report', started_at: new Date().toISOString(), duration_days: 30 };
 }
 
@@ -78,6 +79,10 @@ function handle(sql, params = []) {
     if (st.checkins.has(key)) return { rows: [], rowCount: 0 };
     st.checkins.add(key);
     return { rows: [{ day_number: day }], rowCount: 1 };
+  }
+  if (/^SELECT id FROM users WHERE id = \$1 FOR UPDATE$/.test(text)) return { rows: [{ id: Number(params[0]) }] };
+  if (/^SELECT COUNT\(\*\)::int AS total FROM community_missions WHERE community_id = \$1 AND created_by = \$2/.test(text)) {
+    return { rows: [{ total: st.openByMe }] };
   }
   if (/^INSERT INTO community_missions/.test(text)) {
     return { rows: [{ id: 41, title: params[1], description: params[2], duration_days: params[3], max_participants: params[4], start_day: '2026-11-27' }], rowCount: 1 };
@@ -135,6 +140,21 @@ describe('Maratona da comunidade', { concurrency: 1 }, () => {
     assert.match(q.text, /\(NOW\(\) AT TIME ZONE 'Europe\/Lisbon'\)::date/);
     assert.match(q.text, /WHERE d\.day BETWEEN \(NOW\(\) AT TIME ZONE 'Europe\/Lisbon'\)::date AND \(NOW\(\) AT TIME ZONE 'Europe\/Lisbon'\)::date \+ 14/);
     assert.ok(wrote('community_mission_participants'));
+  });
+
+  test('negado: já tem uma maratona aberta nesta comunidade: 409, nada criado; a trava vem antes da contagem', async () => {
+    st.openByMe = 1;
+    const res = await call('POST', '/api/community-missions/foco', { body: GOOD });
+    assert.equal(res.status, 409);
+    assert.equal(res.body.code, 'open_marathon');
+    assert.equal(res.body.error, 'Você já tem uma maratona aberta nesta comunidade. Quando ela terminar, você pode criar outra.');
+    assert.equal(wrote('community_missions'), false);
+    const texts = st.queries.map((q) => q.text);
+    const lock = texts.findIndex((t) => /^SELECT id FROM users WHERE id = \$1 FOR UPDATE$/.test(t));
+    const count = texts.findIndex((t) => /FROM community_missions WHERE community_id = \$1 AND created_by = \$2/.test(t));
+    assert.ok(lock >= 0 && lock < count);
+    assert.match(texts[count], /start_day \+ duration_days - 1 >= \(NOW\(\) AT TIME ZONE 'Europe\/Lisbon'\)::date$/);
+    assert.ok(texts.includes('ROLLBACK'));
   });
 
   test('negado: crise no nome ou no mínimo do dia: ajuda, nada gravado nem enviado ao banco', async () => {

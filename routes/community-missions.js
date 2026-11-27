@@ -62,6 +62,7 @@ const T = {
   alreadyDone: 'Você já registrou o dia de hoje na maratona.',
   done: 'Dia registrado na maratona.',
   created: 'Maratona criada.',
+  openMarathon: 'Você já tem uma maratona aberta nesta comunidade. Quando ela terminar, você pode criar outra.',
   joined: 'Você entrou na maratona.',
   unavailable: 'A maratona ainda não está disponível. Tente de novo mais tarde.',
   server: 'Não deu para concluir agora. Tente de novo daqui a pouco.',
@@ -230,6 +231,7 @@ router.post('/:slug', auth, async (req, res) => {
     return res.status(400).json({ error: T.start, code: 'invalid_start' });
   }
 
+  let client;
   try {
     const community = await findCommunity(req.params.slug, userId);
     if (!community) return res.status(404).json({ error: T.communityNotFound });
@@ -237,8 +239,28 @@ router.post('/:slug', auth, async (req, res) => {
     const access = await createAccess(userId, community);
     if (!access.ok) return res.status(403).json({ error: access.message, code: access.code, locked: true });
 
+    // Decisão do dono do projeto (27/11): no máximo 1 maratona criada pela
+    // pessoa e ainda não terminada (futura ou em andamento) em cada
+    // comunidade. Contagem e gravação na mesma transação, com a linha da
+    // pessoa travada: dois pedidos ao mesmo tempo não criam duas. Sem
+    // migração (um índice único não sabe o que é "ainda não terminou").
+    client = await db.connect();
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+    const openRes = await client.query(
+      `SELECT COUNT(*)::int AS total FROM community_missions
+       WHERE community_id = $1 AND created_by = $2
+         AND mode = 'maratona' AND start_day IS NOT NULL
+         AND start_day + duration_days - 1 >= ${TODAY_SQL}`,
+      [community.id, userId]
+    );
+    if (Number(openRes.rows[0].total) >= 1) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: T.openMarathon, code: 'open_marathon' });
+    }
+
     // O início entra como data de Lisboa e é conferido pelo relógio do banco.
-    const result = await db.query(
+    const result = await client.query(
       `INSERT INTO community_missions
          (community_id, title, description, mode, scope, duration_days, max_participants,
           created_by, start_day, starts_at, ends_at, status)
@@ -252,18 +274,27 @@ router.post('/:slug', auth, async (req, res) => {
                  to_char(start_day, 'YYYY-MM-DD') AS start_day`,
       [community.id, title.value, minimum.value, days, people, userId, body.start_day || null]
     );
-    if (!result.rows[0]) return res.status(400).json({ error: T.start, code: 'invalid_start' });
+    if (!result.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: T.start, code: 'invalid_start' });
+    }
 
     // Quem cria entra.
-    await db.query(
+    await client.query(
       `INSERT INTO community_mission_participants (community_mission_id, user_id)
        VALUES ($1, $2) ON CONFLICT (community_mission_id, user_id) DO NOTHING`,
       [result.rows[0].id, userId]
     );
+    await client.query('COMMIT');
     res.status(201).json({ marathon: result.rows[0], message: T.created });
   } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
+    }
     if (err && err.code === '22008') return res.status(400).json({ error: T.start, code: 'invalid_start' });
     fail(res, err);
+  } finally {
+    if (client) client.release();
   }
 });
 

@@ -10,7 +10,7 @@ const { classifyNote } = require('../lib/crisis-filter');
 const { NOTE_MAX_CHARS, noteLength } = require('../lib/note-limit');
 const { ensureAdmin } = require('../lib/admin');
 const { makeAdultGate, adultRequiredBody } = require('../lib/adult-gate');
-const { postAccess, rankBySubject, areaLabel } = require('../lib/community-access');
+const { postAccess, rankBySubject, areaLabel, isValidArea, AREA_INVALID_MESSAGE } = require('../lib/community-access');
 const {
   URGENT_REASON,
   FAST_TRACK_PER_DAY,
@@ -40,6 +40,45 @@ const RECOMMEND_UNAVAILABLE_MESSAGE = 'As recomendações ainda não estão disp
 const RECOMMEND_NO_AREA_MESSAGE = 'Esta missão não tem área. As recomendações aparecem para missões com área.';
 const RECOMMEND_NOT_FOUND_MESSAGE = 'Missão não encontrada.';
 const RECOMMEND_LIMIT = 20;
+
+// Criar comunidade (decisões de 26/11: quem concluiu uma missão de 30 dias;
+// área obrigatória). Textos novos para o sim do dono do projeto.
+const CREATE_MIN_DAYS = 30;
+const CREATE_NAME_MAX = 40;
+const CREATE_TOPIC_MAX = 30;
+const CREATE_DESCRIPTION_MAX = 200;
+// Contra spam: no máximo 1 comunidade criada por pessoa a cada 7 dias
+// (proposta; o número é fácil de trocar).
+const CREATE_PER_WEEK = 1;
+const CREATE_RESERVED_SLUGS = ['admin', 'suggest', 'smart-suggest', 'recommended'];
+const CREATE_CRISIS_MESSAGE = 'A comunidade não foi criada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
+const CREATE_LOCKED_MESSAGE = 'Criar uma comunidade abre depois que você concluir uma missão de 30 dias.';
+const CREATE_NAME_MESSAGE = `Dê um nome à comunidade, com até ${CREATE_NAME_MAX} caracteres.`;
+const CREATE_NAME_LETTERS_MESSAGE = 'Use letras ou números no nome da comunidade.';
+const CREATE_TOPIC_MESSAGE = `O assunto passou de ${CREATE_TOPIC_MAX} caracteres. Encurte um pouco e envie de novo.`;
+const CREATE_DESCRIPTION_MESSAGE = `As regras passaram de ${CREATE_DESCRIPTION_MAX} caracteres. Encurte um pouco e envie de novo.`;
+const CREATE_TEXT_MESSAGE = 'O nome, o assunto e as regras precisam ser texto. Escreva de novo e envie.';
+const CREATE_DUPLICATE_MESSAGE = 'Já existe uma comunidade com esse nome.';
+const CREATE_RATE_LIMIT_MESSAGE = 'Você já criou uma comunidade nesta semana. Tente de novo daqui a alguns dias.';
+const CREATE_UNAVAILABLE_MESSAGE = 'Criar uma comunidade ainda não está disponível. Tente de novo mais tarde.';
+const CREATE_SERVER_ERROR_MESSAGE = 'Não deu para criar a comunidade agora. Tente de novo daqui a pouco.';
+
+// Texto curto opcional: espaços juntados; vazio vira null; não texto = erro.
+function optionalText(value) {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  if (typeof value !== 'string') return { ok: false };
+  const text = value.replace(/\s+/g, ' ').trim();
+  return { ok: true, value: text || null };
+}
+
+function slugOf(name) {
+  return name.toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 60)
+    .replace(/-$/, '');
+}
 const POST_RATE_LIMIT_MESSAGE = `Você já publicou ${POSTS_PER_DAY} posts nas últimas 24 horas. Tente de novo amanhã.`;
 const POST_SERVER_ERROR_MESSAGE = 'Não deu para publicar agora. Tente de novo daqui a pouco.';
 
@@ -899,54 +938,124 @@ router.post('/:slug/posts/:postId/report', auth, async (req, res) => {
 // ============================================
 // CRIAR COMUNIDADE
 // POST /api/communities
-// Body: { name, description, category, icon, cover_color }
+// Body: { name, area, category (o assunto, opcional), description (as regras,
+//         opcional), icon, cover_color }
+//
+// Ordem: filtro de crise no nome, no assunto e nas regras (o portão 18+ já
+// mostra a ajuda antes, até para quem não tem 18+) → textos válidos → área →
+// 1 missão de 30 dias CONCLUÍDA (dono ou parceiro do Duo; antes eram 3
+// missões de qualquer tamanho) → limite de 1 por semana, com a linha da
+// pessoa travada → grava. Antes da 013 (sem communities.area): 503 calmo.
 // ============================================
 router.post('/', auth, async (req, res) => {
-  const { name, description, category, icon, cover_color } = req.body;
+  const { area, icon, cover_color } = req.body || {};
   const userId = req.user.userId;
 
-  if (!name || !category) {
-    return res.status(400).json({ error: 'Nome e categoria são obrigatórios.' });
+  const name = optionalText(req.body?.name);
+  const topic = optionalText(req.body?.category);
+  const description = optionalText(req.body?.description);
+
+  // Crise primeiro: nada é gravado e o texto não vai para log nem para o banco.
+  for (const field of [req.body?.name, req.body?.category, req.body?.description]) {
+    const level = typeof field === 'string' ? classifyNote(field) : null;
+    if (level) {
+      return res.status(200).json({
+        saved: false,
+        crisis: true,
+        crisis_level: level,
+        message: CREATE_CRISIS_MESSAGE
+      });
+    }
   }
 
+  if (!name.ok || !topic.ok || !description.ok) {
+    return res.status(400).json({ error: CREATE_TEXT_MESSAGE, code: 'invalid_text' });
+  }
+  if (!name.value || Array.from(name.value).length > CREATE_NAME_MAX) {
+    return res.status(400).json({ error: CREATE_NAME_MESSAGE, code: 'invalid_name' });
+  }
+  const slug = slugOf(name.value);
+  if (slug.length < 2) {
+    return res.status(400).json({ error: CREATE_NAME_LETTERS_MESSAGE, code: 'invalid_name' });
+  }
+  if (!isValidArea(area)) {
+    return res.status(400).json({ error: AREA_INVALID_MESSAGE, code: 'invalid_area' });
+  }
+  if (topic.value && Array.from(topic.value).length > CREATE_TOPIC_MAX) {
+    return res.status(400).json({ error: CREATE_TOPIC_MESSAGE, code: 'invalid_topic' });
+  }
+  if (description.value && Array.from(description.value).length > CREATE_DESCRIPTION_MAX) {
+    return res.status(400).json({ error: CREATE_DESCRIPTION_MESSAGE, code: 'invalid_description' });
+  }
+  if (CREATE_RESERVED_SLUGS.includes(slug)) {
+    return res.status(409).json({ error: CREATE_DUPLICATE_MESSAGE, code: 'name_taken' });
+  }
+
+  let client;
   try {
-    // Verificar patente do utilizador — precisa de ser pelo menos Elite
-    const rankRes = await db.query(
-      `SELECT COUNT(*) as total FROM missions
+    // Só missão pessoal (tabela missions) de 30 dias ou mais, concluída.
+    const doneRes = await db.query(
+      `SELECT COUNT(*) AS total FROM missions
        WHERE (user_id = $1 OR partner_id = $1)
-         AND status = 'completed'`,
-      [userId]
+         AND status = 'completed'
+         AND duration_days >= $2`,
+      [userId, CREATE_MIN_DAYS]
     );
-    const totalCompleted = parseInt(rankRes.rows[0].total);
-    if (totalCompleted < 3) {
+    const done = parseInt(doneRes.rows[0].total, 10) || 0;
+    if (done < 1) {
       return res.status(403).json({
-        error: 'Precisas de completar pelo menos 3 missões para criar uma comunidade.',
-        missions_done: totalCompleted,
-        needed: 3
+        error: CREATE_LOCKED_MESSAGE,
+        code: 'needs_completed_mission',
+        locked: true,
+        missions_done: 0,
+        needed: 1
       });
     }
 
-    const slug = name.toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
-
-    const result = await db.query(
-      `INSERT INTO communities (name, slug, description, category, icon, cover_color, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [name, slug, description, category, icon || '⚡', cover_color || '#FF5C00', userId]
+    // Limite e gravação na mesma transação, com a linha da pessoa travada:
+    // dois pedidos ao mesmo tempo não criam duas.
+    client = await db.connect();
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+    const recentRes = await client.query(
+      `SELECT COUNT(*) AS total FROM communities
+       WHERE created_by = $1
+         AND created_at > NOW() - INTERVAL '7 days'`,
+      [userId]
     );
+    if (parseInt(recentRes.rows[0].total, 10) >= CREATE_PER_WEEK) {
+      await client.query('ROLLBACK');
+      return res.status(429).json({ error: CREATE_RATE_LIMIT_MESSAGE, code: 'create_limit', limit: CREATE_PER_WEEK });
+    }
+
+    const result = await client.query(
+      `INSERT INTO communities (name, slug, description, category, area, icon, cover_color, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [name.value, slug, description.value, topic.value || area, area,
+        typeof icon === 'string' && icon ? icon.slice(0, 8) : '⚡',
+        typeof cover_color === 'string' && /^#[0-9a-fA-F]{6}$/.test(cover_color) ? cover_color : '#FF5C00',
+        userId]
+    );
+    await client.query('COMMIT');
 
     res.status(201).json({
       community: result.rows[0],
-      message: 'Comunidade criada com sucesso!'
+      message: 'Comunidade criada.'
     });
-
   } catch (err) {
-    if (err.code === '23505') {
-      return res.status(400).json({ error: 'Já existe uma comunidade com este nome.' });
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
     }
-    res.status(500).json({ error: 'Erro ao criar comunidade.' });
+    if (err && err.code === '23505') {
+      return res.status(409).json({ error: CREATE_DUPLICATE_MESSAGE, code: 'name_taken' });
+    }
+    if (isMissingSchema(err)) {
+      return res.status(503).json({ error: CREATE_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    }
+    // Sem log: nada do pedido vai para o console.
+    res.status(500).json({ error: CREATE_SERVER_ERROR_MESSAGE });
+  } finally {
+    if (client) client.release();
   }
 });
 

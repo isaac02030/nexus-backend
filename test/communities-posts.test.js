@@ -71,11 +71,17 @@ function handle(sql, params = []) {
   }
 
   if (/^INSERT INTO community_members/i.test(text)) {
+    db.lastMemberInsert = params;
     const exists = db.members.some((m) =>
       m.community_id === Number(params[0]) && m.user_id === Number(params[1]));
     if (exists) return { rows: [], rowCount: 0 };
     db.members.push({ community_id: Number(params[0]), user_id: Number(params[1]) });
     return { rows: [{ id: db.members.length }], rowCount: 1 };
+  }
+
+  // Título ao entrar (lib/merit): missões que contam, por pessoa.
+  if (/^SELECT \(SELECT COUNT\(\*\)::int FROM missions mm/.test(text) && /FROM users u WHERE u\.id = \$1$/.test(text)) {
+    return { rows: [{ missions: db.completedMissions.get(Number(params[0])) || 0 }] };
   }
 
   if (/^UPDATE communities SET member_count/i.test(text)) {
@@ -275,6 +281,38 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
     assert.equal(res.status, 200);
     assert.equal(res.body.already_member, false);
     assert.equal(db.communities[0].member_count, 2);
+  });
+
+  test('entrar: resposta com o título novo (não a patente antiga); rank fica só por compatibilidade', async () => {
+    db.completedMissions.set(1, 6);
+    const res = await request('POST', '/api/communities/foco/join', { token: tokenFor(1) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.title, { name: 'Constante', level: 3, marks: 5 });
+    assert.equal(res.body.rank, 'Constante');
+    assert.equal(res.body.missions_done, 6);
+    assert.equal(res.body.message, 'Você entrou na comunidade Foco.');
+    assert.doesNotMatch(JSON.stringify(res.body), /patente|recruta|veterano|elite|campe|lenda/i);
+    assert.equal(db.lastMemberInsert[2], 'Constante');
+    // A contagem é a do mérito (todas as missões de 30 dias), não por categoria.
+    assert.ok(db.queries.some((q) => /^SELECT \(SELECT COUNT\(\*\)::int FROM missions mm/.test(q.text)));
+    assert.equal(db.queries.some((q) => /AND category = \$2/.test(q.text)), false);
+  });
+
+  test('entrar sem missão que conta: sem título', async () => {
+    const res = await request('POST', '/api/communities/foco/join', { token: tokenFor(2) });
+    assert.equal(res.body.title, null);
+    assert.equal(res.body.rank, null);
+    assert.equal(db.lastMemberInsert[2], '');
+  });
+
+  test('posts: is_mine diz se o post é de quem pede (página e publicar)', async () => {
+    db.posts.push({ id: 1, community_id: 3, user_id: 9, content: 'de outra pessoa' }, { id: 2, community_id: 3, user_id: 2, content: 'meu' });
+    const page = await request('GET', '/api/communities/foco', { token: tokenFor(2) });
+    assert.deepEqual(page.body.posts.map((p) => [p.id, p.is_mine]), [[1, false], [2, true]]);
+    makeMember(2);
+    const sent = await request('POST', '/api/communities/foco/posts', { token: tokenFor(2), body: { content: 'nova dica' } });
+    assert.equal(sent.status, 201);
+    assert.equal(sent.body.post.is_mine, true);
   });
 
   test('entrar de novo não soma membro', async () => {

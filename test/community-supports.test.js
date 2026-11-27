@@ -308,6 +308,11 @@ describe('apoios, destaques e lista', { concurrency: 1 }, () => {
     assert.equal(res.body.posts[0].cursor_time, undefined);
     assert.equal(res.body.posts[0].author_title, null);
     assert.equal(res.body.posts[0].author_missions, undefined);
+    // is_mine: quem pede (5) não é o autor (2). user_id fica por compatibilidade (obsoleto).
+    assert.equal(res.body.posts[0].is_mine, false);
+    db.feedRows = [row(40, '2026-11-27 09:00:00'), { ...row(41, '2026-11-27 08:59:00'), user_id: 5 }];
+    const mine = await call('GET', '/api/communities/foco/posts');
+    assert.deepEqual(mine.body.posts.map((p) => p.is_mine), [false, true]);
     const q = db.queries.find((item) => /ORDER BY cp\.created_at DESC, cp\.id DESC LIMIT \$5$/.test(item.text));
     assert.deepEqual(q.params, [3, 5, null, null, 11]);
     assert.doesNotMatch(q.text, /OFFSET/);
@@ -351,7 +356,7 @@ describe('apoios, destaques e lista', { concurrency: 1 }, () => {
     assert.equal(res.status, 200);
     // Título do autor (PR D): nome e nível, sem o número cru.
     assert.deepEqual(res.body, {
-      highlights: [{ id: 10, week_supports: 4, supports: 6, supported_by_me: false, author_title: { name: 'Praticante', level: 2, marks: 5 } }],
+      highlights: [{ id: 10, week_supports: 4, supports: 6, supported_by_me: false, author_title: { name: 'Praticante', level: 2, marks: 5 }, is_mine: false }],
       days: 7,
       max: 3
     });

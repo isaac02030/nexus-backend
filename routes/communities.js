@@ -14,6 +14,7 @@ const {
   postAccess, rankBySubject, areaLabel, isValidArea, AREA_INVALID_MESSAGE,
   isReadOnlyCommunity, READ_ONLY_MESSAGE, isEmojiIcon
 } = require('../lib/community-access');
+const { MERIT_RULE, meritCountSql, titleFor, nextTitle } = require('../lib/merit');
 const {
   URGENT_REASON,
   FAST_TRACK_PER_DAY,
@@ -24,7 +25,6 @@ const {
   shouldHide,
   hiddenMessage
 } = require('../lib/post-reports');
-const { MERIT_RULE, meritCountSql, titleFor, nextTitle } = require('../lib/merit');
 const router   = express.Router();
 
 // Posts do fórum: mesmo limite de tamanho da frase do check-in (280
@@ -87,6 +87,10 @@ function slugOf(name) {
 const POST_RATE_LIMIT_MESSAGE = `Você já publicou ${POSTS_PER_DAY} posts nas últimas 24 horas. Tente de novo amanhã.`;
 const POST_SERVER_ERROR_MESSAGE = 'Não deu para publicar agora. Tente de novo daqui a pouco.';
 
+// Mérito e ranking (PR D). Textos para o sim do dono do projeto.
+const MERIT_SERVER_ERROR_MESSAGE = 'Não deu para abrir o mérito agora. Tente de novo daqui a pouco.';
+const RANKING_TOP = 3;
+
 // Denúncia de posts (regras em lib/post-reports.js).
 const REPORT_DONE_MESSAGE = 'Obrigado. Sua denúncia foi registrada.';
 const REPORT_CRISIS_SAVED_MESSAGE = 'Sua denúncia foi registrada, sem o texto que você escreveu. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
@@ -101,9 +105,6 @@ const REPORT_DUPLICATE_MESSAGE = 'Você já denunciou este post. Uma denúncia p
 const REPORT_UNAVAILABLE_MESSAGE = 'A denúncia ainda não está disponível. Tente de novo mais tarde.';
 const REPORT_SERVER_ERROR_MESSAGE = 'Não deu para enviar a denúncia agora. Tente de novo daqui a pouco.';
 
-// Mérito e ranking (PR D). Textos para o sim do dono do projeto.
-const MERIT_SERVER_ERROR_MESSAGE = 'Não deu para abrir o mérito agora. Tente de novo daqui a pouco.';
-const RANKING_TOP = 3;
 
 // Moderação (só admin).
 const MOD_POST_NOT_FOUND_MESSAGE = 'Post não encontrado.';

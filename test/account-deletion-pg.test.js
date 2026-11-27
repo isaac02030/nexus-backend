@@ -38,7 +38,8 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
   for (const f of ['001_initial_schema.sql', '002_user_reminder.sql', '003_checkin_difficult_day.sql',
     '004_mission_weekdays.sql', '005_community_post_reports.sql', '006_user_adult_confirmation.sql',
     '007_user_note_consent.sql', '008_user_legal_acceptance.sql',
-    '009_user_notification_choices.sql', '010_user_message_notice.sql', '011_chat_blocks_and_reports.sql', '012_mission_invites.sql']) {
+    '009_user_notification_choices.sql', '010_user_message_notice.sql', '011_chat_blocks_and_reports.sql', '012_mission_invites.sql',
+    '013_community_areas.sql']) {
     psqlFile(path.join(repoRoot, 'migrations', f));
   }
   psqlFile(path.join(repoRoot, 'scripts', 'sql', 'papel-do-app.sql'));
@@ -98,6 +99,8 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
   // DUAS missões (achado do Argos no PR 26).
   await mission(12, A, C, 'rival');
   await mission(13, C, A, 'rival');
+  // Migração 013: área e assunto (o assunto é texto da pessoa).
+  await q("UPDATE missions SET area = 'mente', subject = 'assunto-' || id WHERE id IN (10, 11, 13)");
   await mission(14, C, null, 'solo', { merged: 12 });
   await mission(18, C, D, 'parceiro');
   await mission(19, A, null, 'solo');
@@ -169,6 +172,8 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
   assert.equal(m10.user_score, 1);
   assert.equal(m10.partner_score, 0);
   assert.equal(m10.category, 'habito');
+  assert.equal(m10.subject, null, 'o assunto de quem saiu não fica');
+  assert.equal(m10.area, 'mente', 'a área fica com a missão');
   assert.equal(m10.proof_mode, 'self_report');
   assert.equal(m10.started_at.getTime(), m10Before.started_at.getTime(), 'started_at não pode mudar');
   const m10Checkins = (await q('SELECT user_id, note FROM checkins WHERE mission_id = 10')).rows;
@@ -192,6 +197,7 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
   assert.equal(m11.partner_contact, null);
   assert.equal(m11.mode, 'solo');
   assert.equal(m11.title, 'titulo-11');
+  assert.equal(m11.subject, 'assunto-11', 'o assunto do dono que ficou não muda');
 
   // Par ativo por mission_matches: o outro lado fica coerente (solo).
   const m13 = await one('SELECT * FROM missions WHERE id = 13');

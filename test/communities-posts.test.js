@@ -21,17 +21,30 @@ const db = {
   communities: [],
   members: [],
   completedMissions: new Map(), // userId -> missões concluídas na categoria
+  activeAreas: new Map(),       // userId -> áreas das missões ATIVAS (dono ou parceiro)
+  missions: [],                 // para a recomendação: { id, user_id, partner_id, area, subject }
   recentPosts: new Map(),       // userId -> posts nas últimas 24 horas
   posts: [],
   queries: [],
   failInsert: false,
+  before013: false,             // migração 013 não aplicada: sem colunas area/subject
   notAdult: new Set()
 };
 
 function resetDb() {
-  db.communities = [{ id: 3, slug: 'foco', name: 'Foco', category: 'estudo', member_count: 1 }];
+  db.communities = [
+    { id: 3, slug: 'foco', name: 'Foco', category: 'estudo', member_count: 1, area: 'mente' },
+    { id: 4, slug: 'sem-area', name: 'Antiga', category: 'estudo', member_count: 1, area: null },
+    { id: 5, slug: 'idiomas', name: 'Idiomas', description: 'Inglês, espanhol e outras línguas', category: 'idiomas', member_count: 9, is_default: true, area: 'mente' },
+    { id: 6, slug: 'psicologia', name: 'Psicologia', description: 'Leituras de psicologia e filosofia', category: 'estudo', member_count: 2, area: 'mente' },
+    { id: 7, slug: 'corrida', name: 'Corrida', category: 'corrida', member_count: 30, is_default: true, area: 'corpo' }
+  ];
   db.members = [];
   db.completedMissions = new Map();
+  db.activeAreas = new Map();
+  db.missions = [];
+  db.before013 = false;
+  db.missionAreaMissing = false;
   db.recentPosts = new Map();
   db.posts = [];
   db.queries = [];
@@ -92,7 +105,51 @@ function handle(sql, params = []) {
 
   if (/^SELECT \* FROM communities WHERE slug = \$1/i.test(text)) {
     const c = db.communities.find((item) => item.slug === params[0]);
-    return { rows: c ? [{ ...c }] : [] };
+    if (!c) return { rows: [] };
+    const row = { ...c };
+    if (db.before013) delete row.area;
+    return { rows: [row] };
+  }
+
+  const missingColumn = () => Object.assign(new Error('column "area" does not exist'), { code: '42703' });
+
+  // Missões ativas da pessoa (dono ou parceiro): só a área.
+  if (/^SELECT area FROM missions WHERE \(user_id = \$1 OR partner_id = \$1\) AND status = 'active'$/i.test(text)) {
+    if (db.before013 || db.missionAreaMissing) throw missingColumn();
+    return { rows: (db.activeAreas.get(Number(params[0])) || []).map((area) => ({ area })) };
+  }
+
+  // Recomendação: a missão da pessoa (dono ou parceiro).
+  if (/^SELECT id, area, subject FROM missions WHERE id = \$1 AND \(user_id = \$2 OR partner_id = \$2\)$/i.test(text)) {
+    if (db.before013) throw missingColumn();
+    const m = db.missions.find((item) => item.id === Number(params[0])
+      && (item.user_id === Number(params[1]) || item.partner_id === Number(params[1])));
+    return { rows: m ? [{ id: m.id, area: m.area, subject: m.subject }] : [] };
+  }
+
+  if (/FROM communities c LEFT JOIN community_members cm ON cm\.community_id = c\.id AND cm\.user_id = \$1 WHERE c\.area = \$2$/i.test(text)) {
+    return {
+      rows: db.communities.filter((c) => c.area === params[1]).map((c) => ({
+        ...c,
+        is_member: db.members.some((m) => m.community_id === c.id && m.user_id === Number(params[0]))
+      }))
+    };
+  }
+
+  // Ver comunidade (GET /:slug).
+  if (/^SELECT c\.\*, CASE WHEN cm\.user_id IS NOT NULL/i.test(text) && /WHERE c\.slug = \$2$/i.test(text)) {
+    const c = db.communities.find((item) => item.slug === params[1]);
+    if (!c) return { rows: [] };
+    const row = { ...c, is_member: db.members.some((m) => m.community_id === c.id && m.user_id === Number(params[0])), missions_done: 0, total_days: 0 };
+    if (db.before013) delete row.area;
+    return { rows: [row] };
+  }
+
+  if (/FROM community_posts cp JOIN users u ON cp\.user_id = u\.id WHERE cp\.community_id = \$1/i.test(text)) {
+    return {
+      rows: db.posts.filter((p) => p.community_id === Number(params[0]))
+        .map((p) => ({ ...p, username: `pessoa${p.user_id}`, hidden: false }))
+    };
   }
 
   if (/FROM community_members WHERE community_id = \$1 AND user_id = \$2/i.test(text)) {
@@ -128,9 +185,10 @@ function textReachedDb(fragment) {
   return db.queries.some((q) => q.params.some((p) => typeof p === 'string' && p.includes(fragment)));
 }
 
-function makeMember(userId, { completed = 1, recent = 0 } = {}) {
-  db.members.push({ community_id: 3, user_id: userId });
-  db.completedMissions.set(userId, completed);
+// Membro da comunidade "foco" (área mente) com uma missão ATIVA de mente.
+function makeMember(userId, { areas = ['mente'], recent = 0, communityId = 3 } = {}) {
+  db.members.push({ community_id: communityId, user_id: userId });
+  db.activeAreas.set(userId, areas);
   db.recentPosts.set(userId, recent);
 }
 
@@ -234,7 +292,7 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
 
   // ---------- T2: posts ----------
 
-  test('membro com missão concluída publica', async () => {
+  test('membro com missão ativa da mesma área publica', async () => {
     makeMember(1);
     const res = await request('POST', '/api/communities/foco/posts', {
       token: tokenFor(1), body: { content: '  Estudei 25 minutos antes do café.  ' }
@@ -262,14 +320,208 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
     assert.equal(insertedPost(), false);
   });
 
-  test('membro sem missão concluída na categoria: 403 locked', async () => {
-    makeMember(2, { completed: 0 });
+  // ---------- Áreas (migração 013): postar pede missão ATIVA da mesma área ----------
+
+  test('negado: membro sem missão ativa: 403 com o motivo, nada gravado', async () => {
+    makeMember(2, { areas: [] });
+    db.completedMissions.set(2, 5); // missões concluídas não contam mais
     const res = await request('POST', '/api/communities/foco/posts', {
       token: tokenFor(2), body: { content: 'uma dica' }
     });
     assert.equal(res.status, 403);
     assert.equal(res.body.locked, true);
+    assert.equal(res.body.code, 'no_active_mission');
+    assert.equal(res.body.error, 'Para postar aqui você precisa de uma missão ativa em Mente.');
+    assert.equal(res.body.community_area, 'mente');
     assert.equal(insertedPost(), false);
+  });
+
+  test('negado: missão ativa de outra área: 403 dizendo as duas áreas', async () => {
+    makeMember(2, { areas: ['corpo'] });
+    const res = await request('POST', '/api/communities/foco/posts', {
+      token: tokenFor(2), body: { content: 'uma dica' }
+    });
+    assert.equal(res.status, 403);
+    assert.equal(res.body.code, 'other_area');
+    assert.equal(res.body.error, 'Sua missão ativa é de Corpo. Esta comunidade é de Mente.');
+    assert.equal(insertedPost(), false);
+  });
+
+  test('negado: missão ativa antiga, sem área: 403 com o motivo', async () => {
+    makeMember(2, { areas: [null] });
+    const res = await request('POST', '/api/communities/foco/posts', {
+      token: tokenFor(2), body: { content: 'uma dica' }
+    });
+    assert.equal(res.status, 403);
+    assert.equal(res.body.code, 'mission_without_area');
+    assert.match(res.body.error, /ainda não tem área/);
+    assert.equal(insertedPost(), false);
+  });
+
+  test('uma missão de outra área não atrapalha: basta uma ativa da mesma área', async () => {
+    makeMember(2, { areas: ['corpo', null, 'mente'] });
+    const res = await request('POST', '/api/communities/foco/posts', {
+      token: tokenFor(2), body: { content: 'uma dica' }
+    });
+    assert.equal(res.status, 201);
+  });
+
+  test('só missão ATIVA entra na conta (o SQL pede status active, dono ou parceiro)', async () => {
+    makeMember(2);
+    await request('POST', '/api/communities/foco/posts', {
+      token: tokenFor(2), body: { content: 'uma dica' }
+    });
+    const q = db.queries.find((item) => /^SELECT area FROM missions/i.test(item.text));
+    assert.ok(q);
+    assert.match(q.text, /\(user_id = \$1 OR partner_id = \$1\)/);
+    assert.match(q.text, /status = 'active'$/);
+    assert.deepEqual(q.params, [2]);
+  });
+
+  test('negado: comunidade ainda sem área: ninguém posta', async () => {
+    makeMember(2, { communityId: 4 });
+    const res = await request('POST', '/api/communities/sem-area/posts', {
+      token: tokenFor(2), body: { content: 'uma dica' }
+    });
+    assert.equal(res.status, 403);
+    assert.equal(res.body.code, 'community_without_area');
+    assert.equal(insertedPost(), false);
+  });
+
+  test('negado: antes da 013, postar dá 503 calmo, sem 500 e nada gravado', async () => {
+    makeMember(2);
+    db.before013 = true;
+    const res = await request('POST', '/api/communities/foco/posts', {
+      token: tokenFor(2), body: { content: 'uma dica' }
+    });
+    assert.equal(res.status, 503);
+    assert.equal(res.body.code, 'unavailable');
+    assert.equal(res.body.error, 'Os posts ainda não estão disponíveis. Tente de novo mais tarde.');
+    assert.equal(insertedPost(), false);
+  });
+
+  test('negado: coluna da comunidade existe, mas a das missões não: 503, não 500', async () => {
+    makeMember(2);
+    db.missionAreaMissing = true;
+    const res = await request('POST', '/api/communities/foco/posts', {
+      token: tokenFor(2), body: { content: 'uma dica' }
+    });
+    assert.equal(res.status, 503);
+    assert.equal(insertedPost(), false);
+  });
+
+  // ---------- Ler é aberto ----------
+
+  test('ler sem missão e sem ser membro: 200 com os posts, sem poder postar', async () => {
+    db.posts.push({ id: 1, community_id: 3, user_id: 9, content: 'dica antiga' });
+    const res = await request('GET', '/api/communities/foco', { token: tokenFor(2) });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.access.can_read_forum, true);
+    assert.equal(res.body.access.can_post_forum, false);
+    assert.equal(res.body.access.post_code, 'no_active_mission');
+    assert.equal(res.body.posts.length, 1);
+    assert.equal(res.body.posts[0].content, 'dica antiga');
+  });
+
+  test('ler com missão ativa da área, sem ser membro: pode ler; postar pede entrar', async () => {
+    db.activeAreas.set(2, ['mente']);
+    const res = await request('GET', '/api/communities/foco', { token: tokenFor(2) });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.access.can_post_forum, false);
+    assert.equal(res.body.access.post_code, 'not_member');
+  });
+
+  test('membro com missão ativa da área: a página diz que pode postar', async () => {
+    makeMember(2);
+    const res = await request('GET', '/api/communities/foco', { token: tokenFor(2) });
+    assert.equal(res.body.access.can_post_forum, true);
+    assert.equal(res.body.access.post_code, 'ok');
+    assert.equal(res.body.access.post_requirement, '');
+  });
+
+  test('antes da 013, ler continua funcionando (sem 500) e ninguém posta', async () => {
+    makeMember(2);
+    db.before013 = true;
+    db.posts.push({ id: 1, community_id: 3, user_id: 9, content: 'dica antiga' });
+    const res = await request('GET', '/api/communities/foco', { token: tokenFor(2) });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.posts.length, 1);
+    assert.equal(res.body.access.can_post_forum, false);
+    assert.equal(res.body.access.post_code, 'unavailable');
+  });
+
+  test('negado: ler sem login: 401', async () => {
+    const res = await request('GET', '/api/communities/foco');
+    assert.equal(res.status, 401);
+  });
+
+  // ---------- Recomendadas para uma missão ----------
+
+  test('recomendadas: só a mesma área, o assunto parecido primeiro (sem acento, por palavra)', async () => {
+    db.missions.push({ id: 40, user_id: 2, partner_id: null, area: 'mente', subject: 'Psicológia e leitura' });
+    const res = await request('GET', '/api/communities/recommended/40', { token: tokenFor(2) });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.area, 'mente');
+    assert.equal(res.body.area_label, 'Mente');
+    const slugs = res.body.communities.map((c) => c.slug);
+    assert.deepEqual(slugs, ['psicologia', 'idiomas', 'foco']);
+    assert.equal(res.body.communities[0].subject_match, true);
+    assert.equal(res.body.communities[1].subject_match, false);
+    assert.equal(slugs.includes('corrida'), false);
+  });
+
+  test('recomendadas: o parceiro do Duo também vê as da missão', async () => {
+    db.missions.push({ id: 41, user_id: 2, partner_id: 3, area: 'corpo', subject: null });
+    const res = await request('GET', '/api/communities/recommended/41', { token: tokenFor(3) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.communities.map((c) => c.slug), ['corrida']);
+  });
+
+  test('negado: recomendadas da missão de outra pessoa: 404, sem dizer se existe', async () => {
+    db.missions.push({ id: 42, user_id: 2, partner_id: null, area: 'mente', subject: 'idiomas' });
+    const other = await request('GET', '/api/communities/recommended/42', { token: tokenFor(8) });
+    const missing = await request('GET', '/api/communities/recommended/999', { token: tokenFor(8) });
+    const bad = await request('GET', '/api/communities/recommended/abc', { token: tokenFor(8) });
+    assert.equal(other.status, 404);
+    assert.deepEqual(other.body, missing.body);
+    assert.equal(bad.status, 404);
+    assert.equal(db.queries.some((q) => /WHERE c\.area = \$2/.test(q.text)), false);
+    const ask = db.queries.find((q) => /^SELECT id, area, subject FROM missions/.test(q.text));
+    assert.match(ask.text, /WHERE id = \$1 AND \(user_id = \$2 OR partner_id = \$2\)$/);
+    assert.deepEqual(ask.params, [42, 8]);
+  });
+
+  test('recomendadas: missão sem área responde vazio, com o motivo', async () => {
+    db.missions.push({ id: 43, user_id: 2, partner_id: null, area: null, subject: null });
+    const res = await request('GET', '/api/communities/recommended/43', { token: tokenFor(2) });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.area, null);
+    assert.deepEqual(res.body.communities, []);
+    assert.match(res.body.message, /não tem área/);
+  });
+
+  test('negado: recomendadas antes da 013: 503 calmo', async () => {
+    db.before013 = true;
+    const res = await request('GET', '/api/communities/recommended/40', { token: tokenFor(2) });
+    assert.equal(res.status, 503);
+    assert.equal(res.body.code, 'unavailable');
+  });
+
+  test('negado: recomendadas sem login: 401; sem 18+: 403', async () => {
+    const semLogin = await request('GET', '/api/communities/recommended/40');
+    assert.equal(semLogin.status, 401);
+    db.notAdult.add(2);
+    const semIdade = await request('GET', '/api/communities/recommended/40', { token: tokenFor(2) });
+    assert.equal(semIdade.status, 403);
+    assert.equal(semIdade.body.code, 'adult_confirmation_required');
+  });
+
+  test('/recommended/:missionId vem antes de /:slug', () => {
+    const paths = communitiesRouter.stack
+      .filter((layer) => layer.route && layer.route.methods.get)
+      .map((layer) => layer.route.path);
+    assert.ok(paths.indexOf('/recommended/:missionId') >= 0);
+    assert.ok(paths.indexOf('/recommended/:missionId') < paths.indexOf('/:slug'));
   });
 
   test('comunidade inexistente: 404', async () => {
@@ -451,6 +703,7 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
       ['GET', '/api/communities'],
       ['GET', '/api/communities/suggest/estudo'],
       ['GET', '/api/communities/smart-suggest/5'],
+      ['GET', '/api/communities/recommended/5'],
       ['GET', '/api/communities/foco'],
       ['POST', '/api/communities', { name: 'Nova', category: 'estudo' }],
       ['POST', '/api/communities/foco/join'],

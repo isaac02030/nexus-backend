@@ -8,6 +8,12 @@ const { db } = require('../lib/db');
 const auth = require('../middleware/auth');
 const { validateMissionWeekdays } = require('../lib/mission-days');
 const { parseArea, parseSubject } = require('../lib/community-access');
+const { classifyNote } = require('../lib/crisis-filter');
+
+// O assunto (PR 40) é texto livre que fica no banco: passa pelo filtro de
+// crise antes de tudo. Com alerta, a missão não é criada (texto para o sim
+// do dono do projeto).
+const MISSION_CRISIS_MESSAGE = 'A missão não foi criada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
 const router = express.Router();
 
 let missionParticipantHealingReady = false;
@@ -161,6 +167,16 @@ router.post('/', auth, async (req, res) => {
     subject
   } = req.body;
   const userId = req.user.userId;
+
+  const subjectCrisis = typeof subject === 'string' ? classifyNote(subject) : null;
+  if (subjectCrisis) {
+    return res.status(200).json({
+      saved: false,
+      crisis: true,
+      crisis_level: subjectCrisis,
+      message: MISSION_CRISIS_MESSAGE
+    });
+  }
 
   if (!title || !category) {
     return res.status(400).json({ error: 'Titulo e categoria sao obrigatorios.' });

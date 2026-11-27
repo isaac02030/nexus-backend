@@ -216,13 +216,10 @@ async function checkPostAccess(userId, community) {
   }
 }
 
-// Patentes por missões completadas na categoria
-function getRank(missionsDone) {
-  if (missionsDone >= 10) return 'lenda';
-  if (missionsDone >= 5)  return 'campeão';
-  if (missionsDone >= 3)  return 'elite';
-  if (missionsDone >= 1)  return 'veterano';
-  return 'recruta';
+// O post é de quem pede? (is_mine). O user_id continua na resposta só por
+// compatibilidade com o site atual: OBSOLETO, sai num PR futuro.
+function isMine(row, userId) {
+  return row != null && row.user_id != null && Number(row.user_id) === Number(userId);
 }
 
 // ============================================
@@ -675,10 +672,7 @@ router.get('/:slug', auth, async (req, res) => {
         [community.id, userId]
       );
       // O título do autor (PR D): só o nome e o nível, calculados na leitura.
-      posts = postsRes.rows.map(({ author_missions: authorMissions, ...row }) => ({
-        ...row,
-        author_title: titleFor(authorMissions)
-      })).map((post) => {
+      posts = postsRes.rows.map((row) => withAuthorTitle(row, userId)).map((post) => {
         if (!post.hidden) {
           const { hidden_reason: _, ...visible } = post;
           return visible;
@@ -749,12 +743,12 @@ async function loadDayDone(userId) {
 }
 
 // Título do autor (PR D): só o nome e o nível; o número cru não sai.
-function withAuthorTitle({ author_missions: authorMissions, ...row }) {
-  return { ...row, author_title: titleFor(authorMissions) };
+function withAuthorTitle({ author_missions: authorMissions, ...row }, userId) {
+  return { ...row, author_title: titleFor(authorMissions), is_mine: isMine(row, userId) };
 }
 
-function visiblePost(post) {
-  const { cursor_time: _, ...rest } = withAuthorTitle(post);
+function visiblePost(post, userId) {
+  const { cursor_time: _, ...rest } = withAuthorTitle(post, userId);
   if (!rest.hidden) {
     const { hidden_reason: __, ...visible } = rest;
     return visible;
@@ -804,7 +798,7 @@ router.get('/:slug/posts', auth, async (req, res) => {
     const last = rows[rows.length - 1];
     const nextCursor = postsRes.rows.length > pageSize && last ? encodeCursor(last.cursor_time, last.id) : null;
     res.json({
-      posts: rows.map(visiblePost),
+      posts: rows.map((post) => visiblePost(post, userId)),
       next_cursor: nextCursor,
       page_size: pageSize,
       continuous_scroll: continuous,
@@ -843,7 +837,7 @@ router.get('/:slug/highlights', auth, async (req, res) => {
        LIMIT $4`,
       [community.id, userId, HIGHLIGHTS_DAYS, HIGHLIGHTS_MAX]
     );
-    res.json({ highlights: result.rows.map(withAuthorTitle), days: HIGHLIGHTS_DAYS, max: HIGHLIGHTS_MAX });
+    res.json({ highlights: result.rows.map((row) => withAuthorTitle(row, userId)), days: HIGHLIGHTS_DAYS, max: HIGHLIGHTS_MAX });
   } catch (err) {
     if (isMissingSchema(err)) return res.status(503).json({ error: FEED_UNAVAILABLE_MESSAGE, code: 'unavailable' });
     res.status(500).json({ error: SUPPORT_SERVER_ERROR_MESSAGE });
@@ -948,16 +942,16 @@ router.post('/:slug/join', auth, async (req, res) => {
     const community = commRes.rows[0];
     if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
 
-    // Contar missões completadas do utilizador nesta categoria
+    // Título novo (lib/merit, PR 44): todas as missões pessoais de 30 dias
+    // concluídas. Antes: a patente antiga (recruta…lenda) por categoria.
     const missionsRes = await db.query(
-      `SELECT COUNT(*) as total FROM missions
-       WHERE (user_id = $1 OR partner_id = $1)
-         AND category = $2
-         AND status = 'completed'`,
-      [userId, community.category]
+      `SELECT ${meritCountSql('u.id')} AS missions FROM users u WHERE u.id = $1`,
+      [userId]
     );
-    const missionsDone = parseInt(missionsRes.rows[0].total);
-    const rank = getRank(missionsDone);
+    const missionsDone = Number(missionsRes.rows[0]?.missions) || 0;
+    const title = titleFor(missionsDone);
+    // A coluna antiga rank (NOT NULL) guarda o nome do título, ou '' sem título.
+    const rank = title ? title.name : '';
 
     // Adicionar membro. Se a pessoa já era membro, o ON CONFLICT não grava
     // nada (rowCount 0) e o contador não sobe. A chave única
@@ -981,9 +975,11 @@ router.post('/:slug/join', auth, async (req, res) => {
     res.json({
       success: true,
       already_member: !joinedNow,
-      rank,
+      title,
       missions_done: missionsDone,
-      message: `Bem-vindo à comunidade ${community.name}! A tua patente é ${rank}.`
+      // rank: OBSOLETO (compatibilidade); use title.
+      rank: title ? title.name : null,
+      message: `Você entrou na comunidade ${community.name}.`
     });
 
   } catch (err) {
@@ -1087,7 +1083,7 @@ router.post('/:slug/posts', auth, async (req, res) => {
     );
     await client.query('COMMIT');
 
-    res.status(201).json({ post: result.rows[0] });
+    res.status(201).json({ post: { ...result.rows[0], is_mine: true } });
 
   } catch (err) {
     if (client) {

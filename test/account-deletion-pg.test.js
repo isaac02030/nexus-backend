@@ -17,7 +17,7 @@ const PASSWORD = 'senha-de-teste-123';
 const A = 2; const B = 3; const C = 4; const D = 5; const E = 6;
 const TABLES = ['users', 'missions', 'mission_matches', 'checkins', 'messages', 'notification_log',
   'push_subscriptions', 'communities', 'community_members', 'community_posts', 'community_post_reports',
-  'community_missions', 'community_mission_participants'];
+  'community_missions', 'community_mission_participants', 'community_post_supports'];
 
 function psqlFile(file) {
   execFileSync('psql', [dbUrl, '--no-psqlrc', '-v', 'ON_ERROR_STOP=1', '-q',
@@ -39,7 +39,7 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
     '004_mission_weekdays.sql', '005_community_post_reports.sql', '006_user_adult_confirmation.sql',
     '007_user_note_consent.sql', '008_user_legal_acceptance.sql',
     '009_user_notification_choices.sql', '010_user_message_notice.sql', '011_chat_blocks_and_reports.sql', '012_mission_invites.sql',
-    '013_community_areas.sql']) {
+    '013_community_areas.sql', '015_community_post_supports.sql']) {
     psqlFile(path.join(repoRoot, 'migrations', f));
   }
   psqlFile(path.join(repoRoot, 'scripts', 'sql', 'papel-do-app.sql'));
@@ -127,6 +127,8 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
   await q(`INSERT INTO community_members (community_id, user_id) VALUES (1,$1),(1,$2),(2,$1),(2,$2)`, [A, B]);
   await q(`INSERT INTO community_posts (id, community_id, user_id, content) VALUES (1,2,$1,'post-A'),(2,2,$2,'post-B')`, [A, B]);
   await q(`INSERT INTO community_post_reports (post_id, reporter_id, reason, details) VALUES (1,$1,'spam','denuncia-sobre-A'),(2,$2,'outro','denuncia-A')`, [B, A]);
+  // Migração 015: A apoiou o post de B; B apoiou o de A; C apoiou o de B.
+  await q('INSERT INTO community_post_supports (post_id, user_id) VALUES (2,$1),(1,$2),(2,$3)', [A, B, C]);
   await q(`INSERT INTO community_missions (id, community_id, title, description, mode, created_by) VALUES (1,2,'cm-A','cm-desc-A','x',$1)`, [A]);
   await q(`INSERT INTO community_mission_participants (community_mission_id, user_id) VALUES (1,$1),(1,$2)`, [A, B]);
 
@@ -242,6 +244,8 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
   const joined = JSON.stringify(after);
   for (const s of ['nota-B-11', 'msg-B-11', 'nota-C-13', 'post-B', 'endpoint-B', 'nota-E-30']) assert.ok(joined.includes(s), `sumiu ${s}`);
   assert.equal((await one('SELECT member_count FROM communities WHERE id = 2')).member_count, 1);
+  // Apoios: os de A e os recebidos nos posts de A saem; o de C no post de B fica.
+  assert.deepEqual((await q('SELECT post_id, user_id FROM community_post_supports')).rows, [{ post_id: 2, user_id: C }]);
   assert.equal((await one('SELECT created_by FROM communities WHERE id = 1')).created_by, null);
 
   // Depois: login falha e o token antigo não vale.

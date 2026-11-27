@@ -227,6 +227,40 @@ describe('criar comunidade', { concurrency: 1 }, () => {
     assert.equal(db.created.length, 0);
   });
 
+  test('negado: ícone «me matar»: ajuda de crise, nada gravado nem enviado ao banco', async () => {
+    const res = await create({ ...OK, icon: 'me matar' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.crisis, true);
+    assert.equal(res.body.saved, false);
+    assert.equal(inserted(), false);
+    assert.equal(reachedDb('matar'), false);
+  });
+
+  test('negado: ícone que não é emoji: 400, nada gravado', async () => {
+    for (const icon of ['abc', 'oi', '1', ':)', '⚡a', 'a'.repeat(9), 7, { a: 1 }]) {
+      const res = await create({ ...OK, icon });
+      assert.equal(res.status, 400, JSON.stringify(icon));
+      assert.equal(res.body.code, 'invalid_icon');
+      assert.equal(res.body.error, 'O ícone precisa ser um emoji. Escolha outro e envie de novo.');
+    }
+    assert.equal(inserted(), false);
+  });
+
+  test('ícone emoji passa (com tom de pele, ZWJ e bandeira); sem ícone, o padrão', async () => {
+    for (const icon of ['📚', '🏃🏽‍♀️', '❤️', '🇧🇷']) {
+      resetDb();
+      db.completed.set(1, 1);
+      const res = await create({ ...OK, icon });
+      assert.equal(res.status, 201, icon);
+      const q = db.queries.find((item) => /^INSERT INTO communities/.test(item.text));
+      assert.equal(q.params[5], icon);
+    }
+    resetDb();
+    db.completed.set(1, 1);
+    await create(OK);
+    assert.equal(db.queries.find((item) => /^INSERT INTO communities/.test(item.text)).params[5], '⚡');
+  });
+
   test('erro do banco: 500 calmo, sem log', async () => {
     db.failInsert = true;
     const res = await create(OK);
@@ -259,9 +293,9 @@ describe('migração 014: as 8 comunidades prontas', () => {
     assert.match(code, /COMMIT;\s*$/);
   });
 
-  test('Alimentação: dicas sim, promessa de emagrecer e números extremos não', () => {
+  test('Alimentação: o texto da Lanterna, palavra por palavra', () => {
     const food = rows.find((r) => r.slug === 'alimentacao');
-    assert.match(food.description, /Aqui valem dicas; promessa de emagrecer e números extremos não\./);
+    assert.equal(food.description, 'Aqui a conversa é sobre hábito e comida do dia a dia. Sem metas de peso, sem calorias muito baixas, sem jejum longo e sem fotos de corpo. Se a comida está pesando para você, toque em Ajuda.');
   });
 
   test('descrições curtas, sem emoji nem exclamação; bloco de voltar atrás no cabeçalho', () => {

@@ -10,7 +10,10 @@ const { classifyNote } = require('../lib/crisis-filter');
 const { NOTE_MAX_CHARS, noteLength } = require('../lib/note-limit');
 const { ensureAdmin } = require('../lib/admin');
 const { makeAdultGate, adultRequiredBody } = require('../lib/adult-gate');
-const { postAccess, rankBySubject, areaLabel, isValidArea, AREA_INVALID_MESSAGE } = require('../lib/community-access');
+const {
+  postAccess, rankBySubject, areaLabel, isValidArea, AREA_INVALID_MESSAGE,
+  isReadOnlyCommunity, READ_ONLY_MESSAGE, isEmojiIcon
+} = require('../lib/community-access');
 const {
   URGENT_REASON,
   FAST_TRACK_PER_DAY,
@@ -61,6 +64,7 @@ const CREATE_TEXT_MESSAGE = 'O nome, o assunto e as regras precisam ser texto. E
 const CREATE_DUPLICATE_MESSAGE = 'Já existe uma comunidade com esse nome.';
 const CREATE_RATE_LIMIT_MESSAGE = 'Você já criou uma comunidade nesta semana. Tente de novo daqui a alguns dias.';
 const CREATE_UNAVAILABLE_MESSAGE = 'Criar uma comunidade ainda não está disponível. Tente de novo mais tarde.';
+const CREATE_ICON_MESSAGE = 'O ícone precisa ser um emoji. Escolha outro e envie de novo.';
 const CREATE_SERVER_ERROR_MESSAGE = 'Não deu para criar a comunidade agora. Tente de novo daqui a pouco.';
 
 // Texto curto opcional: espaços juntados; vazio vira null; não texto = erro.
@@ -180,6 +184,10 @@ async function activeMissionAreas(userId) {
 async function checkPostAccess(userId, community) {
   const unavailable = { ok: false, code: 'unavailable', unavailable: true, message: POST_AREAS_UNAVAILABLE_MESSAGE };
   if (!community || !Object.prototype.hasOwnProperty.call(community, 'area')) return unavailable;
+  // Só leitura / em breve (desligado por padrão: lib/community-access.js).
+  if (isReadOnlyCommunity(community.slug)) {
+    return { ok: false, code: 'read_only', message: READ_ONLY_MESSAGE };
+  }
   try {
     const areas = await activeMissionAreas(userId);
     return postAccess(areas, community.area);
@@ -956,7 +964,7 @@ router.post('/', auth, async (req, res) => {
   const description = optionalText(req.body?.description);
 
   // Crise primeiro: nada é gravado e o texto não vai para log nem para o banco.
-  for (const field of [req.body?.name, req.body?.category, req.body?.description]) {
+  for (const field of [req.body?.name, req.body?.category, req.body?.description, icon]) {
     const level = typeof field === 'string' ? classifyNote(field) : null;
     if (level) {
       return res.status(200).json({
@@ -986,6 +994,10 @@ router.post('/', auth, async (req, res) => {
   }
   if (description.value && Array.from(description.value).length > CREATE_DESCRIPTION_MAX) {
     return res.status(400).json({ error: CREATE_DESCRIPTION_MESSAGE, code: 'invalid_description' });
+  }
+  // Ícone: opcional; se vier, só emoji (nada de palavra livre).
+  if (icon !== undefined && icon !== null && icon !== '' && !isEmojiIcon(icon)) {
+    return res.status(400).json({ error: CREATE_ICON_MESSAGE, code: 'invalid_icon' });
   }
   if (CREATE_RESERVED_SLUGS.includes(slug)) {
     return res.status(409).json({ error: CREATE_DUPLICATE_MESSAGE, code: 'name_taken' });
@@ -1032,7 +1044,7 @@ router.post('/', auth, async (req, res) => {
       `INSERT INTO communities (name, slug, description, category, area, icon, cover_color, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
       [name.value, slug, description.value, topic.value || area, area,
-        typeof icon === 'string' && icon ? icon.slice(0, 8) : '⚡',
+        isEmojiIcon(icon) ? icon : '⚡',
         typeof cover_color === 'string' && /^#[0-9a-fA-F]{6}$/.test(cover_color) ? cover_color : '#FF5C00',
         userId]
     );

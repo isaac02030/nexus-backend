@@ -378,6 +378,50 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
     assert.deepEqual(q.params, [2]);
   });
 
+  test('só leitura / em breve: desligado por padrão (lista vazia)', () => {
+    const { READ_ONLY_COMMUNITY_SLUGS, isReadOnlyCommunity } = require('../lib/community-access');
+    assert.deepEqual(READ_ONLY_COMMUNITY_SLUGS, []);
+    assert.equal(isReadOnlyCommunity('alimentacao'), false);
+    assert.equal(isReadOnlyCommunity('alimentacao', ['alimentacao']), true);
+  });
+
+  test('negado: com a comunidade na lista de só leitura, ninguém posta, mas lê', async () => {
+    const { READ_ONLY_COMMUNITY_SLUGS } = require('../lib/community-access');
+    READ_ONLY_COMMUNITY_SLUGS.push('foco');
+    try {
+      makeMember(2);
+      const res = await request('POST', '/api/communities/foco/posts', {
+        token: tokenFor(2), body: { content: 'uma dica' }
+      });
+      assert.equal(res.status, 403);
+      assert.equal(res.body.code, 'read_only');
+      assert.equal(res.body.error, 'Os posts aqui abrem em breve. Por enquanto, dá para ler.');
+      assert.equal(insertedPost(), false);
+      const read = await request('GET', '/api/communities/foco', { token: tokenFor(2) });
+      assert.equal(read.status, 200);
+      assert.equal(read.body.access.can_read_forum, true);
+      assert.equal(read.body.access.can_post_forum, false);
+      assert.equal(read.body.access.post_code, 'read_only');
+    } finally {
+      READ_ONLY_COMMUNITY_SLUGS.length = 0;
+    }
+  });
+
+  test('crise vale mesmo na comunidade de só leitura (ajuda, nada gravado)', async () => {
+    const { READ_ONLY_COMMUNITY_SLUGS } = require('../lib/community-access');
+    READ_ONLY_COMMUNITY_SLUGS.push('foco');
+    try {
+      makeMember(2);
+      const res = await request('POST', '/api/communities/foco/posts', {
+        token: tokenFor(2), body: { content: 'quero me matar' }
+      });
+      assert.equal(res.body.crisis, true);
+      assert.equal(insertedPost(), false);
+    } finally {
+      READ_ONLY_COMMUNITY_SLUGS.length = 0;
+    }
+  });
+
   test('negado: comunidade ainda sem área: ninguém posta', async () => {
     makeMember(2, { communityId: 4 });
     const res = await request('POST', '/api/communities/sem-area/posts', {

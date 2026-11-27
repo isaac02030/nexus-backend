@@ -12,7 +12,7 @@
 --     'leitura', 'academia', 'corrida', 'alimentacao', 'organizacao', 'sono');
 --
 -- Sem autor (created_by NULL) e is_default = true. Os textos são para o sim
--- do dono do projeto; as regras da Alimentação passam pela Lanterna.
+-- do dono do projeto; o texto da Alimentação é o da Lanterna (27/11).
 --
 -- Para voltar atrás (só se ainda não houver posts nelas: posts, membros e
 -- missões de comunidade saem junto, em cascata):
@@ -31,7 +31,7 @@ VALUES
   ('Leitura', 'leitura', 'Livros, páginas por dia e o que você está lendo agora.', 'leitura', 'mente', true, NULL, 0),
   ('Academia', 'academia', 'Treino de força e rotina na academia. Dúvidas de iniciante são bem-vindas.', 'academia', 'corpo', true, NULL, 0),
   ('Corrida', 'corrida', 'Do primeiro quilômetro à prova. Conte o treino do dia e o que ajudou a sair de casa.', 'corrida', 'corpo', true, NULL, 0),
-  ('Alimentação', 'alimentacao', 'Dicas de comida do dia a dia. Aqui valem dicas; promessa de emagrecer e números extremos não.', 'alimentacao', 'corpo', true, NULL, 0),
+  ('Alimentação', 'alimentacao', 'Aqui a conversa é sobre hábito e comida do dia a dia. Sem metas de peso, sem calorias muito baixas, sem jejum longo e sem fotos de corpo. Se a comida está pesando para você, toque em Ajuda.', 'alimentacao', 'corpo', true, NULL, 0),
   ('Organização', 'organizacao', 'Casa, agenda, finanças e tarefas. O que você organizou hoje e como.', 'organizacao', 'rotina', true, NULL, 0),
   ('Sono', 'sono', 'Horário de dormir, rotina da noite e o que ajuda a acordar melhor.', 'sono', 'rotina', true, NULL, 0)
 ON CONFLICT (slug) DO NOTHING;

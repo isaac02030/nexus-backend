@@ -149,7 +149,7 @@ function handle(sql, params = []) {
   if (/^SELECT to_char\(reminder_time, 'HH24:MI'\) AS reminder_time, timezone FROM users WHERE id = \$1$/.test(text)) {
     return { rows: [{ reminder_time: '08:00', timezone: 'Europe/Lisbon' }] };
   }
-  if (/^SELECT \* FROM missions WHERE \(user_id = \$1 OR partner_id = \$1\) AND status = 'active'$/.test(text)) {
+  if (/^SELECT m\.\* FROM missions m WHERE \(m\.user_id = \$1 OR \(m\.partner_id = \$1 AND COALESCE\(m\.mode, ''\) <> 'rival' AND NOT EXISTS \( SELECT 1 FROM mission_matches mx WHERE mx\.mission_a_id = m\.id OR mx\.mission_b_id = m\.id \)\)\) AND m\.status = 'active'$/.test(text)) {
     return { rows: db.missions };
   }
   if (/^SELECT mission_id, day_number FROM checkins WHERE user_id = \$1 AND completed = true AND mission_id = ANY\(\$2::int\[\]\)$/.test(text)) {

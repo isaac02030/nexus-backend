@@ -115,7 +115,7 @@ function handle(sql, params = []) {
   const missingColumn = () => Object.assign(new Error('column "area" does not exist'), { code: '42703' });
 
   // Missões ativas da pessoa (dono ou parceiro): só a área.
-  if (/^SELECT area FROM missions WHERE \(user_id = \$1 OR partner_id = \$1\) AND status = 'active'$/i.test(text)) {
+  if (/^SELECT m\.area FROM missions m WHERE \(m\.user_id = \$1 OR \(m\.partner_id = \$1 AND COALESCE\(m\.mode, ''\) <> 'rival' AND NOT EXISTS \( SELECT 1 FROM mission_matches mx WHERE mx\.mission_a_id = m\.id OR mx\.mission_b_id = m\.id \)\)\) AND m\.status = 'active'$/i.test(text)) {
     if (db.before013 || db.missionAreaMissing) throw missingColumn();
     return { rows: (db.activeAreas.get(Number(params[0])) || []).map((area) => ({ area })) };
   }
@@ -372,10 +372,11 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
     await request('POST', '/api/communities/foco/posts', {
       token: tokenFor(2), body: { content: 'uma dica' }
     });
-    const q = db.queries.find((item) => /^SELECT area FROM missions/i.test(item.text));
+    const q = db.queries.find((item) => /^SELECT m\.area FROM missions m/i.test(item.text));
     assert.ok(q);
-    assert.match(q.text, /\(user_id = \$1 OR partner_id = \$1\)/);
-    assert.match(q.text, /status = 'active'$/);
+    // Dono ou parceiro do Duo de verdade; a missão do rival não conta.
+    assert.match(q.text, /\(m\.user_id = \$1 OR \(m\.partner_id = \$1 AND COALESCE\(m\.mode, ''\) <> 'rival' AND NOT EXISTS \( SELECT 1 FROM mission_matches mx WHERE mx\.mission_a_id = m\.id OR mx\.mission_b_id = m\.id \)\)\)/);
+    assert.match(q.text, /m\.status = 'active'$/);
     assert.deepEqual(q.params, [2]);
   });
 

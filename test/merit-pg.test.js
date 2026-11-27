@@ -1,7 +1,9 @@
 // Mérito no Postgres real (PR D, achado do Argos): Rival e par por
 // mission_matches não somam a missão do outro; Duo conta para os dois.
-// Pulado sem ACCOUNT_DELETION_TEST_DATABASE_URL apontando para um banco
-// LOCAL e descartável (o mesmo do teste da exclusão; o esquema é recriado).
+// Pulado sem MERIT_TEST_DATABASE_URL apontando para um banco LOCAL e
+// descartável (nexus_merit_test; o esquema é recriado). Banco próprio: o
+// node --test roda os arquivos em paralelo, e o teste da exclusão de conta
+// recria o esquema do banco dele.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -9,13 +11,13 @@ const path = require('node:path');
 const http = require('node:http');
 const { execFileSync } = require('node:child_process');
 
-const dbUrl = process.env.ACCOUNT_DELETION_TEST_DATABASE_URL || '';
-const localTestDb = /nexus_account_deletion_test/.test(dbUrl)
+const dbUrl = process.env.MERIT_TEST_DATABASE_URL || '';
+const localTestDb = /nexus_merit_test/.test(dbUrl)
   && /localhost|127\.0\.0\.1|\/var\/run\/postgresql|host=\//.test(dbUrl);
 const repoRoot = path.join(__dirname, '..');
 
-test('mérito no Postgres: Rival 1 para cada, Duo 1 para cada, par por mission_matches 1 para cada', {
-  skip: localTestDb ? false : 'Defina ACCOUNT_DELETION_TEST_DATABASE_URL para um Postgres local descartável (nexus_account_deletion_test).',
+test('Postgres: missão do rival não é da pessoa (mérito, post e rolagem); Duo conta para os dois', {
+  skip: localTestDb ? false : 'Defina MERIT_TEST_DATABASE_URL para um Postgres local descartável (nexus_merit_test).',
   timeout: 60000
 }, async (t) => {
   const { Client } = require('pg');
@@ -84,4 +86,33 @@ test('mérito no Postgres: Rival 1 para cada, Duo 1 para cada, par por mission_m
     assert.equal(r.me.missions, 1, names[id - 1]);
     assert.equal(r.me.position, id, names[id - 1]); // empate: quem entrou antes vem antes
   }
+
+  // ---- A missão do rival não libera o post nem a rolagem (mesma regra) ----
+  // rival1 (8) tem uma missão ATIVA de Mente, com todo dia sendo dia da missão
+  // e sem check-in hoje. rival2 (9) tem a dele, de Corpo, só às segundas: hoje
+  // pode ser dia livre para ela. partner_id cruzado, mode 'rival'.
+  await q(`INSERT INTO users (id, username, email, password, adult_confirmed_at) VALUES
+           (8,'ativo1','ativo1@exemplo.test','x',NOW()), (9,'ativo2','ativo2@exemplo.test','x',NOW())`);
+  const todayIso = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Lisbon', weekday: 'short' })
+    .format(new Date()).replace(/Mon|Tue|Wed|Thu|Fri|Sat|Sun/, (d) => ({ Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 })[d]));
+  const notToday = todayIso === 1 ? [2, 3, 4] : [todayIso % 7 + 1, (todayIso + 1) % 7 + 1, (todayIso + 2) % 7 + 1];
+  await q(`INSERT INTO missions (user_id, partner_id, title, category, mode, status, area, started_at)
+           VALUES (8, 9, 't', 'c', 'rival', 'active', 'mente', NOW() - INTERVAL '2 days')`);
+  await q(`INSERT INTO missions (user_id, partner_id, title, category, mode, status, area, started_at, mission_weekdays)
+           VALUES (9, 8, 't', 'c', 'rival', 'active', 'corpo', NOW() - INTERVAL '2 days', $1::smallint[])`, [notToday]);
+  const corrida = (await q(`SELECT id FROM communities WHERE slug = 'corrida'`)).rows[0].id;
+  await q(`INSERT INTO community_members (community_id, user_id) VALUES ($1, 8)`, [corrida]);
+  await q(`INSERT INTO community_posts (community_id, user_id, content) VALUES ($1, 9, 'treino de hoje')`, [corrida]);
+  const as8 = { Authorization: `Bearer ${jwt.sign({ userId: 8 }, process.env.JWT_SECRET)}`, 'Content-Type': 'application/json' };
+  const post = await fetch(`${base}/api/communities/corrida/posts`, { method: 'POST', headers: as8, body: JSON.stringify({ content: 'uma dica' }) });
+  const postBody = await post.json();
+  assert.equal(post.status, 403, 'a área da missão do rival não libera o post');
+  assert.equal(postBody.code, 'other_area');
+  const feed = await (await fetch(`${base}/api/communities/corrida/posts`, { headers: as8 })).json();
+  assert.equal(feed.continuous_scroll, false, 'o dia livre do rival não libera a rolagem');
+  assert.equal(feed.page_size, 10);
+  // Controle: a própria rival2, em dia livre, ganha a rolagem.
+  const as9 = { Authorization: `Bearer ${jwt.sign({ userId: 9 }, process.env.JWT_SECRET)}` };
+  const own = await (await fetch(`${base}/api/communities/corrida/posts`, { headers: as9 })).json();
+  assert.equal(own.continuous_scroll, true, 'o dia livre da própria missão libera');
 });

@@ -15,6 +15,7 @@ const {
   isReadOnlyCommunity, READ_ONLY_MESSAGE, isEmojiIcon
 } = require('../lib/community-access');
 const { MERIT_RULE, meritCountSql, meritConditionSql, titleFor, nextTitle } = require('../lib/merit');
+const { ownOrDuoMissionSql } = require('../lib/mission-participation');
 const {
   URGENT_REASON,
   FAST_TRACK_PER_DAY,
@@ -184,14 +185,14 @@ function getCommunityAccess(community, post) {
   };
 }
 
-// Áreas das missões ATIVAS da pessoa (dono ou parceiro do Duo). Missão
-// concluída, abandonada ou pausada não conta. Quem saiu do Duo já não é
-// partner_id, então não conta.
+// Áreas das missões ATIVAS da pessoa (dono ou parceiro do Duo de verdade).
+// Missão concluída, abandonada ou pausada não conta. Quem saiu do Duo já não
+// é partner_id. A missão do rival não é da pessoa (lib/mission-participation).
 async function activeMissionAreas(userId) {
   const result = await db.query(
-    `SELECT area FROM missions
-     WHERE (user_id = $1 OR partner_id = $1)
-       AND status = 'active'`,
+    `SELECT m.area FROM missions m
+     WHERE ${ownOrDuoMissionSql('$1', 'm')}
+       AND m.status = 'active'`,
     [userId]
   );
   return result.rows.map((row) => (row.area == null ? null : row.area));
@@ -721,10 +722,11 @@ async function loadDayDone(userId) {
        FROM users WHERE id = $1`,
       [userId]
     );
+    // Só as missões da pessoa: o dia livre do rival não libera a rolagem.
     const missionsRes = await db.query(
-      `SELECT * FROM missions
-       WHERE (user_id = $1 OR partner_id = $1)
-         AND status = 'active'`,
+      `SELECT m.* FROM missions m
+       WHERE ${ownOrDuoMissionSql('$1', 'm')}
+         AND m.status = 'active'`,
       [userId]
     );
     const missions = missionsRes.rows;

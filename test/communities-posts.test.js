@@ -5,6 +5,8 @@ const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
 const { withAuthDb } = require('./helpers/auth-db');
+const { ownOrDuoMissionSql } = require('../lib/mission-participation');
+const RULE_TEXT = (who, alias) => String(ownOrDuoMissionSql(who, alias)).replace(/\s+/g, ' ').trim();
 
 process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
@@ -115,7 +117,7 @@ function handle(sql, params = []) {
   const missingColumn = () => Object.assign(new Error('column "area" does not exist'), { code: '42703' });
 
   // Missões ativas da pessoa (dono ou parceiro): só a área.
-  if (/^SELECT area FROM missions WHERE \(user_id = \$1 OR partner_id = \$1\) AND status = 'active'$/i.test(text)) {
+  if (text === `SELECT m.area FROM missions m WHERE ${RULE_TEXT('$1', 'm')} AND m.status = 'active'`) {
     if (db.before013 || db.missionAreaMissing) throw missingColumn();
     return { rows: (db.activeAreas.get(Number(params[0])) || []).map((area) => ({ area })) };
   }
@@ -372,10 +374,11 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
     await request('POST', '/api/communities/foco/posts', {
       token: tokenFor(2), body: { content: 'uma dica' }
     });
-    const q = db.queries.find((item) => /^SELECT area FROM missions/i.test(item.text));
+    const q = db.queries.find((item) => /^SELECT m\.area FROM missions m/i.test(item.text));
     assert.ok(q);
-    assert.match(q.text, /\(user_id = \$1 OR partner_id = \$1\)/);
-    assert.match(q.text, /status = 'active'$/);
+    // Dono ou parceiro do Duo de verdade; a missão do rival não conta.
+    assert.ok(q.text.includes(RULE_TEXT('$1', 'm')), 'regra de quem participa');
+    assert.match(q.text, /m\.status = 'active'$/);
     assert.deepEqual(q.params, [2]);
   });
 

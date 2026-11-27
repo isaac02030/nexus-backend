@@ -14,6 +14,8 @@ const {
   postAccess, rankBySubject, areaLabel, isValidArea, AREA_INVALID_MESSAGE,
   isReadOnlyCommunity, READ_ONLY_MESSAGE, isEmojiIcon
 } = require('../lib/community-access');
+const { MERIT_RULE, meritCountSql, meritConditionSql, titleFor, nextTitle } = require('../lib/merit');
+const { ownOrDuoMissionSql } = require('../lib/mission-participation');
 const {
   URGENT_REASON,
   FAST_TRACK_PER_DAY,
@@ -57,7 +59,7 @@ const CREATE_DESCRIPTION_MAX = 200;
 // Contra spam: no máximo 1 comunidade criada por pessoa a cada 7 dias
 // (proposta; o número é fácil de trocar).
 const CREATE_PER_WEEK = 1;
-const CREATE_RESERVED_SLUGS = ['admin', 'suggest', 'smart-suggest', 'recommended'];
+const CREATE_RESERVED_SLUGS = ['admin', 'suggest', 'smart-suggest', 'recommended', 'merit'];
 const CREATE_CRISIS_MESSAGE = 'A comunidade não foi criada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
 const CREATE_LOCKED_MESSAGE = 'Criar uma comunidade abre depois que você concluir uma missão de 30 dias.';
 const CREATE_NAME_MESSAGE = `Dê um nome à comunidade, com até ${CREATE_NAME_MAX} caracteres.`;
@@ -89,6 +91,10 @@ function slugOf(name) {
 }
 const POST_RATE_LIMIT_MESSAGE = `Você já publicou ${POSTS_PER_DAY} posts nas últimas 24 horas. Tente de novo amanhã.`;
 const POST_SERVER_ERROR_MESSAGE = 'Não deu para publicar agora. Tente de novo daqui a pouco.';
+
+// Mérito e ranking (PR D). Textos para o sim do dono do projeto.
+const MERIT_SERVER_ERROR_MESSAGE = 'Não deu para abrir o mérito agora. Tente de novo daqui a pouco.';
+const RANKING_TOP = 3;
 
 // Denúncia de posts (regras em lib/post-reports.js).
 const REPORT_DONE_MESSAGE = 'Obrigado. Sua denúncia foi registrada.';
@@ -179,14 +185,14 @@ function getCommunityAccess(community, post) {
   };
 }
 
-// Áreas das missões ATIVAS da pessoa (dono ou parceiro do Duo). Missão
-// concluída, abandonada ou pausada não conta. Quem saiu do Duo já não é
-// partner_id, então não conta.
+// Áreas das missões ATIVAS da pessoa (dono ou parceiro do Duo de verdade).
+// Missão concluída, abandonada ou pausada não conta. Quem saiu do Duo já não
+// é partner_id. A missão do rival não é da pessoa (lib/mission-participation).
 async function activeMissionAreas(userId) {
   const result = await db.query(
-    `SELECT area FROM missions
-     WHERE (user_id = $1 OR partner_id = $1)
-       AND status = 'active'`,
+    `SELECT m.area FROM missions m
+     WHERE ${ownOrDuoMissionSql('$1', 'm')}
+       AND m.status = 'active'`,
     [userId]
   );
   return result.rows.map((row) => (row.area == null ? null : row.area));
@@ -539,6 +545,88 @@ router.get('/recommended/:missionId', auth, async (req, res) => {
 });
 
 // ============================================
+// MÉRITO E RANKING (PR D da comunidade; decisão de 27/11, títulos opção A)
+// GET /api/communities/merit/me      → o meu mérito (só o próprio; não há
+//                                      perfil dos outros)
+// GET /api/communities/:slug/ranking → os 3 primeiros + a minha posição
+// Contam só as missões pessoais de 30 dias concluídas (lib/merit.js).
+// O ranking mostra só apelido, título, missões e dias na comunidade; nunca
+// id, e-mail ou outra coisa. Quem não é membro, ou não tem missão que
+// conta, não entra.
+// ============================================
+router.get('/merit/me', auth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT ${meritCountSql('u.id')} AS missions FROM users u WHERE u.id = $1`,
+      [req.user.userId]
+    );
+    const missions = Number(result.rows[0]?.missions) || 0;
+    res.json({
+      missions,
+      title: titleFor(missions),
+      next: nextTitle(missions),
+      rule: MERIT_RULE
+    });
+  } catch (err) {
+    res.status(500).json({ error: MERIT_SERVER_ERROR_MESSAGE });
+  }
+});
+
+// Os 3 primeiros + quem pede. Ordem: missões desc, entrada na comunidade
+// asc, id do membro asc (determinística).
+async function communityRanking(communityId, userId) {
+  const result = await db.query(
+    `WITH members AS (
+       -- Uma contagem agregada para todos os membros (não uma subconsulta
+       -- por linha).
+       SELECT cm.id AS member_id, cm.user_id, cm.created_at AS joined_at, u.username,
+              COUNT(mm.id)::int AS missions
+       FROM community_members cm
+       JOIN users u ON u.id = cm.user_id
+       LEFT JOIN missions mm ON ${meritConditionSql('cm.user_id')}
+       WHERE cm.community_id = $1
+       GROUP BY cm.id, cm.user_id, cm.created_at, u.username
+     ), ordered AS (
+       SELECT member_id, user_id, joined_at, username, missions,
+              ROW_NUMBER() OVER (ORDER BY missions DESC, joined_at ASC, member_id ASC) AS position
+       FROM members
+       WHERE missions > 0
+     )
+     SELECT position::int AS position, username, missions,
+            FLOOR(EXTRACT(EPOCH FROM (NOW()::timestamp - joined_at)) / 86400)::int AS days_in_community,
+            (user_id = $2) AS is_me
+     FROM ordered
+     WHERE position <= $3 OR user_id = $2
+     ORDER BY position`,
+    [communityId, userId, RANKING_TOP]
+  );
+  const rows = result.rows.map((row) => ({
+    position: Number(row.position),
+    username: row.username,
+    title: titleFor(row.missions),
+    missions: Number(row.missions) || 0,
+    days_in_community: Math.max(0, Number(row.days_in_community) || 0),
+    is_me: row.is_me === true
+  }));
+  return {
+    top: rows.filter((row) => row.position <= RANKING_TOP),
+    me: rows.find((row) => row.is_me) || null,
+    rule: MERIT_RULE
+  };
+}
+
+router.get('/:slug/ranking', auth, async (req, res) => {
+  try {
+    const commRes = await db.query('SELECT id FROM communities WHERE slug = $1', [req.params.slug]);
+    const community = commRes.rows[0];
+    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
+    res.json(await communityRanking(community.id, req.user.userId));
+  } catch (err) {
+    res.status(500).json({ error: MERIT_SERVER_ERROR_MESSAGE });
+  }
+});
+
+// ============================================
 // VER COMUNIDADE
 // GET /api/communities/:slug
 // Ler é aberto (18+): os posts vêm para todos, com ou sem missão.
@@ -562,16 +650,9 @@ router.get('/:slug', auth, async (req, res) => {
     if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
     const access = getCommunityAccess(community, await checkPostAccess(userId, community));
 
-    // Top 10 ranking
-    const rankRes = await db.query(
-      `SELECT cm.rank, cm.missions_done, cm.total_days, u.username
-       FROM community_members cm
-       JOIN users u ON cm.user_id = u.id
-       WHERE cm.community_id = $1
-       ORDER BY cm.missions_done DESC, cm.total_days DESC
-       LIMIT 10`,
-      [community.id]
-    );
+    // Ranking: os 3 primeiros + quem pede (antes eram os 10 primeiros, com
+    // a patente antiga e os dias, gravados na entrada e já velhos).
+    const ranking = await communityRanking(community.id, userId);
 
     // Posts recentes. Post escondido por denúncias some para todos, menos
     // para o autor, que o vê com hidden: true e o motivo. As colunas da
@@ -583,7 +664,8 @@ router.get('/:slug', auth, async (req, res) => {
         `SELECT cp.id, cp.community_id, cp.user_id, cp.content, cp.created_at,
                 u.username,
                 (to_jsonb(cp) ->> 'hidden_at') IS NOT NULL AS hidden,
-                CASE WHEN cp.user_id = $2 THEN to_jsonb(cp) ->> 'hidden_reason' END AS hidden_reason
+                CASE WHEN cp.user_id = $2 THEN to_jsonb(cp) ->> 'hidden_reason' END AS hidden_reason,
+                ${meritCountSql('cp.user_id')} AS author_missions
          FROM community_posts cp
          JOIN users u ON cp.user_id = u.id
          WHERE cp.community_id = $1
@@ -592,7 +674,11 @@ router.get('/:slug', auth, async (req, res) => {
          LIMIT 20`,
         [community.id, userId]
       );
-      posts = postsRes.rows.map((post) => {
+      // O título do autor (PR D): só o nome e o nível, calculados na leitura.
+      posts = postsRes.rows.map(({ author_missions: authorMissions, ...row }) => ({
+        ...row,
+        author_title: titleFor(authorMissions)
+      })).map((post) => {
         if (!post.hidden) {
           const { hidden_reason: _, ...visible } = post;
           return visible;
@@ -607,7 +693,7 @@ router.get('/:slug', auth, async (req, res) => {
 
     res.json({
       community,
-      ranking: rankRes.rows,
+      ranking,
       posts,
       access
     });
@@ -636,10 +722,11 @@ async function loadDayDone(userId) {
        FROM users WHERE id = $1`,
       [userId]
     );
+    // Só as missões da pessoa: o dia livre do rival não libera a rolagem.
     const missionsRes = await db.query(
-      `SELECT * FROM missions
-       WHERE (user_id = $1 OR partner_id = $1)
-         AND status = 'active'`,
+      `SELECT m.* FROM missions m
+       WHERE ${ownOrDuoMissionSql('$1', 'm')}
+         AND m.status = 'active'`,
       [userId]
     );
     const missions = missionsRes.rows;
@@ -661,8 +748,13 @@ async function loadDayDone(userId) {
   }
 }
 
+// Título do autor (PR D): só o nome e o nível; o número cru não sai.
+function withAuthorTitle({ author_missions: authorMissions, ...row }) {
+  return { ...row, author_title: titleFor(authorMissions) };
+}
+
 function visiblePost(post) {
-  const { cursor_time: _, ...rest } = post;
+  const { cursor_time: _, ...rest } = withAuthorTitle(post);
   if (!rest.hidden) {
     const { hidden_reason: __, ...visible } = rest;
     return visible;
@@ -697,7 +789,8 @@ router.get('/:slug/posts', auth, async (req, res) => {
               EXISTS (
                 SELECT 1 FROM community_post_supports s2
                 WHERE s2.post_id = cp.id AND s2.user_id = $2
-              ) AS supported_by_me
+              ) AS supported_by_me,
+              ${meritCountSql('cp.user_id')} AS author_missions
        FROM community_posts cp
        JOIN users u ON cp.user_id = u.id
        WHERE cp.community_id = $1
@@ -737,7 +830,8 @@ router.get('/:slug/highlights', auth, async (req, res) => {
               EXISTS (
                 SELECT 1 FROM community_post_supports s2
                 WHERE s2.post_id = cp.id AND s2.user_id = $2
-              ) AS supported_by_me
+              ) AS supported_by_me,
+              ${meritCountSql('cp.user_id')} AS author_missions
        FROM community_posts cp
        JOIN users u ON cp.user_id = u.id
        JOIN community_post_supports s
@@ -749,7 +843,7 @@ router.get('/:slug/highlights', auth, async (req, res) => {
        LIMIT $4`,
       [community.id, userId, HIGHLIGHTS_DAYS, HIGHLIGHTS_MAX]
     );
-    res.json({ highlights: result.rows, days: HIGHLIGHTS_DAYS, max: HIGHLIGHTS_MAX });
+    res.json({ highlights: result.rows.map(withAuthorTitle), days: HIGHLIGHTS_DAYS, max: HIGHLIGHTS_MAX });
   } catch (err) {
     if (isMissingSchema(err)) return res.status(503).json({ error: FEED_UNAVAILABLE_MESSAGE, code: 'unavailable' });
     res.status(500).json({ error: SUPPORT_SERVER_ERROR_MESSAGE });

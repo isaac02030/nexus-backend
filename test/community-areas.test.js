@@ -232,6 +232,27 @@ describe('criar missão com área e assunto', { concurrency: 1 }, () => {
     assert.match(res.body.error, /escolha dos dias/);
   });
 
+  test('negado: assunto com crise: crisis true, missão não criada, texto não chega ao banco', async () => {
+    const res = await create({ ...BASE, area: 'mente', subject: 'quero me matar' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.crisis, true);
+    assert.equal(res.body.saved, false);
+    assert.equal(res.body.crisis_level, 'alto');
+    assert.equal(res.body.message, 'A missão não foi criada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.');
+    assert.equal(state.inserts.length, 0);
+    // Crise vem antes até da validação (sem título também mostra a ajuda).
+    const noTitle = await create({ category: 'x', subject: 'sinto que sou um peso' });
+    assert.equal(noTitle.body.crisis, true);
+    assert.equal(noTitle.body.crisis_level, 'medio');
+    assert.equal(state.inserts.length, 0);
+  });
+
+  test('assunto comum passa pelo filtro e cria', async () => {
+    const res = await create({ ...BASE, area: 'mente', subject: 'psicologia' });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.crisis, undefined);
+  });
+
   test('negado: sem login: 401, nada criado', async () => {
     const res = await create({ ...BASE, area: 'mente' }, { token: null });
     assert.equal(res.status, 401);

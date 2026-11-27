@@ -14,7 +14,7 @@ process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
 
 const usersRouter = require('../routes/users');
-const { ACCOUNT_DELETION_STEPS, TRANSFERRED_MISSION_TITLE } = require('../lib/account-deletion');
+const { ACCOUNT_DELETION_STEPS, TRANSFERRED_MISSION_TITLE, deleteAccountData } = require('../lib/account-deletion');
 const { resetAllAttempts, MAX_WRONG } = require('../lib/password-attempts');
 
 const app = express();
@@ -377,7 +377,9 @@ describe('lista de exclusão cobre o banco', () => {
   test('ordem: troca de dono primeiro (vê os pares), depois pares, registros e missões', () => {
     const at = name => ACCOUNT_DELETION_STEPS.findIndex(step => step.name === name);
     const transfer = at('missoes_passadas_ao_parceiro');
-    assert.equal(transfer, 0);
+    // Só o assunto (migração 013) vem antes, para achar a missão pelo dono.
+    assert.equal(at('assunto_das_missoes_passadas'), 0);
+    assert.equal(transfer, 1);
     assert.ok(transfer < at('pares_das_missoes'));
     assert.ok(at('missao_do_outro_lado_do_par') < at('pares_das_missoes'));
     for (const later of ['fusoes_apontando_para_as_missoes', 'checkins', 'mensagens', 'registro_de_avisos', 'missoes', 'conta']) {
@@ -401,6 +403,42 @@ describe('lista de exclusão cobre o banco', () => {
     assert.match(transfer, /WHERE user_id = \$1 AND partner_id IS NOT NULL/);
     // Missão em par por mission_matches (ativo ou encerrado) não passa ao outro.
     assert.match(transfer, /AND NOT EXISTS \( SELECT 1 FROM mission_matches mm WHERE mm\.mission_a_id = missions\.id OR mm\.mission_b_id = missions\.id \)/);
+  });
+
+  test('assunto (013): vira NULL só nas missões que passam ao parceiro, antes da troca', () => {
+    const subject = ACCOUNT_DELETION_STEPS.find(step => step.name === 'assunto_das_missoes_passadas');
+    const transfer = normalize(ACCOUNT_DELETION_STEPS.find(step => step.name === 'missoes_passadas_ao_parceiro').sql);
+    const sql = normalize(subject.sql);
+    assert.match(sql, /^UPDATE missions SET subject = NULL WHERE /);
+    // Mesmo WHERE da troca de dono: nem mais, nem menos missões.
+    assert.equal(sql.slice(sql.indexOf(' WHERE ')), transfer.slice(transfer.indexOf(' WHERE ')));
+    assert.equal(subject.optional, true);
+    assert.deepEqual(subject.missingCodes, ['42703']);
+    // A área fica (é a classificação da missão que o parceiro continua).
+    assert.doesNotMatch(transfer, /\barea = /);
+  });
+
+  test('passo opcional: coluna que falta (42703) só é tolerada onde foi listada', async () => {
+    const calls = [];
+    const fail = (code) => Object.assign(new Error('falta'), { code });
+    const client = (failOn) => ({
+      async query(sql) {
+        const text = normalize(sql);
+        calls.push(text);
+        if (failOn(text)) throw fail('42703');
+        return { rowCount: 0, rows: [] };
+      }
+    });
+    // Antes da 013: o passo do assunto falha com 42703 e a exclusão segue.
+    const counts = await deleteAccountData(client((t) => /SET subject = NULL/.test(t)), 7);
+    assert.equal(counts.assunto_das_missoes_passadas, 0);
+    assert.ok(calls.includes('ROLLBACK TO SAVEPOINT passo_opcional'));
+    assert.equal(normalize(calls[calls.length - 1]), 'DELETE FROM users WHERE id = $1');
+    // 42703 num passo que não listou o código derruba a exclusão, como antes.
+    await assert.rejects(
+      deleteAccountData(client((t) => /^DELETE FROM mission_invites/.test(t)), 7),
+      (err) => err.code === '42703'
+    );
   });
 
   test('o outro lado do par só muda em par ativo', () => {

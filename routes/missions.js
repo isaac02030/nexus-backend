@@ -7,6 +7,7 @@ const express = require('express');
 const { db } = require('../lib/db');
 const auth = require('../middleware/auth');
 const { validateMissionWeekdays } = require('../lib/mission-days');
+const { parseArea, parseSubject } = require('../lib/community-access');
 const router = express.Router();
 
 let missionParticipantHealingReady = false;
@@ -155,7 +156,9 @@ router.post('/', auth, async (req, res) => {
     study_focus,
     study_current_stage,
     study_target_outcome,
-    mission_weekdays
+    mission_weekdays,
+    area,
+    subject
   } = req.body;
   const userId = req.user.userId;
 
@@ -170,6 +173,18 @@ router.post('/', auth, async (req, res) => {
     return res.status(400).json({ error: weekdays.error });
   }
 
+  // Área (mente, corpo ou rotina) e assunto (migração 013). Opcionais por
+  // enquanto: sem eles, a missão é criada como antes (sem área, lê a
+  // comunidade mas não posta). Com eles, só valores válidos.
+  const areaChoice = parseArea(area);
+  if (!areaChoice.ok) {
+    return res.status(400).json({ error: areaChoice.error, code: 'invalid_area' });
+  }
+  const subjectChoice = parseSubject(subject);
+  if (!subjectChoice.ok) {
+    return res.status(400).json({ error: subjectChoice.error, code: 'invalid_subject' });
+  }
+
   try {
     await healPairedMissionParticipants();
     await healWaitingSoloMissions();
@@ -179,13 +194,34 @@ router.post('/', auth, async (req, res) => {
     // quando a pessoa escolheu os dias; sem escolha, o INSERT fica igual
     // ao de antes e funciona mesmo sem a migração aplicada.
     const withWeekdays = weekdays.value !== null;
+    // Mesma ideia para a área e o assunto (migração 013): só entram no INSERT
+    // quando vieram no pedido.
+    const extraColumns = [];
+    const extraValues = [];
+    const extraParams = [];
+    if (withWeekdays) {
+      extraColumns.push('mission_weekdays');
+      extraParams.push(weekdays.value);
+      extraValues.push(`$${14 + extraParams.length}::smallint[]`);
+    }
+    const withArea = areaChoice.value !== null || subjectChoice.value !== null;
+    if (areaChoice.value !== null) {
+      extraColumns.push('area');
+      extraParams.push(areaChoice.value);
+      extraValues.push(`$${14 + extraParams.length}`);
+    }
+    if (subjectChoice.value !== null) {
+      extraColumns.push('subject');
+      extraParams.push(subjectChoice.value);
+      extraValues.push(`$${14 + extraParams.length}`);
+    }
     const result = await db.query(
       `INSERT INTO missions (
          user_id, title, category, level, mode, match_preference, description,
          daily_minimum, commitment_window, why_it_matters, fallback_plan, proof_mode,
-         study_focus, study_current_stage, study_target_outcome${withWeekdays ? ', mission_weekdays' : ''}
+         study_focus, study_current_stage, study_target_outcome${extraColumns.map((c) => `, ${c}`).join('')}
        )
-       VALUES ($1, $2, $3, $4, 'solo', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14${withWeekdays ? ', $15::smallint[]' : ''})
+       VALUES ($1, $2, $3, $4, 'solo', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14${extraValues.map((v) => `, ${v}`).join('')})
        RETURNING *`,
       [
         userId,
@@ -202,12 +238,17 @@ router.post('/', auth, async (req, res) => {
         study_focus || null,
         study_current_stage || null,
         study_target_outcome || null,
-        ...(withWeekdays ? [weekdays.value] : [])
+        ...extraParams
       ]
     ).catch((err) => {
-      // 42703 = coluna não existe: a migração 004 ainda não foi aplicada.
-      // O INSERT falhou inteiro, então nada foi criado.
-      if (err && err.code === '42703' && withWeekdays) err.missionWeekdaysMissing = true;
+      // 42703 = coluna não existe: a migração 004 (dias) ou a 013 (área)
+      // ainda não foi aplicada. O INSERT falhou inteiro, então nada foi criado.
+      // A mensagem do Postgres diz qual coluna faltou.
+      if (err && err.code === '42703') {
+        const areaColumn = /"(area|subject)"/.test(String(err.message || ''));
+        if (withArea && (areaColumn || !withWeekdays)) err.missionAreaMissing = true;
+        else if (withWeekdays) err.missionWeekdaysMissing = true;
+      }
       throw err;
     });
 
@@ -240,6 +281,12 @@ router.post('/', auth, async (req, res) => {
           : 'Missao solo criada.'
     });
   } catch (err) {
+    if (err && err.missionAreaMissing === true) {
+      return res.status(503).json({
+        error: 'A escolha da área da missão ainda não está disponível. Crie a missão sem escolher a área ou tente mais tarde.',
+        code: 'area_unavailable'
+      });
+    }
     if (err && err.missionWeekdaysMissing === true) {
       return res.status(503).json({
         error: 'A escolha dos dias da missão ainda não está disponível. Crie a missão sem escolher os dias ou tente mais tarde.'

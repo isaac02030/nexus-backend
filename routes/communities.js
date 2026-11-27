@@ -10,6 +10,7 @@ const { classifyNote } = require('../lib/crisis-filter');
 const { NOTE_MAX_CHARS, noteLength } = require('../lib/note-limit');
 const { ensureAdmin } = require('../lib/admin');
 const { makeAdultGate, adultRequiredBody } = require('../lib/adult-gate');
+const { postAccess, rankBySubject, areaLabel } = require('../lib/community-access');
 const {
   URGENT_REASON,
   FAST_TRACK_PER_DAY,
@@ -33,7 +34,12 @@ const POST_NOT_TEXT_MESSAGE = 'O post precisa ser um texto. Escreva de novo e en
 const POST_EMPTY_MESSAGE = 'O post está vazio. Escreva alguma coisa e envie.';
 const POST_TOO_LONG_MESSAGE = `O post passou de ${POST_MAX_CHARS} caracteres. Encurte um pouco e envie de novo.`;
 const POST_NOT_MEMBER_MESSAGE = 'Só membros desta comunidade podem publicar. Entre na comunidade e tente de novo.';
-const POST_LOCKED_MESSAGE = 'Para publicar aqui, conclua primeiro uma missão desta categoria.';
+// Antes da migração 013 (áreas), ninguém posta: falha segura, sem 500.
+const POST_AREAS_UNAVAILABLE_MESSAGE = 'Os posts ainda não estão disponíveis. Tente de novo mais tarde.';
+const RECOMMEND_UNAVAILABLE_MESSAGE = 'As recomendações ainda não estão disponíveis. Tente de novo mais tarde.';
+const RECOMMEND_NO_AREA_MESSAGE = 'Esta missão não tem área. As recomendações aparecem para missões com área.';
+const RECOMMEND_NOT_FOUND_MESSAGE = 'Missão não encontrada.';
+const RECOMMEND_LIMIT = 20;
 const POST_RATE_LIMIT_MESSAGE = `Você já publicou ${POSTS_PER_DAY} posts nas últimas 24 horas. Tente de novo amanhã.`;
 const POST_SERVER_ERROR_MESSAGE = 'Não deu para publicar agora. Tente de novo daqui a pouco.';
 
@@ -91,27 +97,57 @@ const CATEGORY_PROGRESS_SELECT = `
   ), 0) AS missions_done
 `;
 
-function getCommunityAccess(community) {
+// Decisão de 26/11 (áreas): ler o fórum é aberto a quem passou pelo
+// portão 18+, sem precisar de missão nem de ser membro. Postar pede ser
+// membro e ter uma missão ATIVA da mesma área (lib/community-access.js).
+// As missões internas continuam com a regra antiga até o PR da Maratona.
+function getCommunityAccess(community, post) {
   const isMember = !!community?.is_member;
   const missionsDone = Number(community?.missions_done) || 0;
   const totalDays = Number(community?.total_days) || 0;
-  const canReadForum = isMember && (totalDays >= 5 || missionsDone >= 1);
-  const canPostForum = isMember && missionsDone >= 1;
+  const canPostForum = isMember && !!post?.ok;
   const canCreateInternalMissions = isMember && missionsDone >= 1;
-  const canViewInternalMissions = canReadForum;
+  const canViewInternalMissions = isMember && (totalDays >= 5 || missionsDone >= 1);
 
   return {
     is_member: isMember,
     missions_done: missionsDone,
     total_days: totalDays,
-    can_read_forum: canReadForum,
+    can_read_forum: true,
     can_post_forum: canPostForum,
+    post_code: !isMember && post?.ok ? 'not_member' : (post?.code || 'unavailable'),
+    post_requirement: !isMember && post?.ok ? POST_NOT_MEMBER_MESSAGE : (post?.ok ? '' : (post?.message || POST_AREAS_UNAVAILABLE_MESSAGE)),
     can_view_internal_missions: canViewInternalMissions,
     can_create_internal_missions: canCreateInternalMissions,
-    read_requirement: 'Faz 5 check-ins nesta categoria ou conclui 1 missão para desbloquear a leitura da comunidade.',
-    post_requirement: 'Conclui 1 missão nesta categoria para ganhares voz no fórum.',
     mission_requirement: 'Conclui 1 missão nesta categoria para criares missões internas.'
   };
+}
+
+// Áreas das missões ATIVAS da pessoa (dono ou parceiro do Duo). Missão
+// concluída, abandonada ou pausada não conta. Quem saiu do Duo já não é
+// partner_id, então não conta.
+async function activeMissionAreas(userId) {
+  const result = await db.query(
+    `SELECT area FROM missions
+     WHERE (user_id = $1 OR partner_id = $1)
+       AND status = 'active'`,
+    [userId]
+  );
+  return result.rows.map((row) => (row.area == null ? null : row.area));
+}
+
+// Pode postar nesta comunidade? Antes da 013 (sem a coluna area): não, com
+// um aviso calmo (unavailable), nunca um 500.
+async function checkPostAccess(userId, community) {
+  const unavailable = { ok: false, code: 'unavailable', unavailable: true, message: POST_AREAS_UNAVAILABLE_MESSAGE };
+  if (!community || !Object.prototype.hasOwnProperty.call(community, 'area')) return unavailable;
+  try {
+    const areas = await activeMissionAreas(userId);
+    return postAccess(areas, community.area);
+  } catch (err) {
+    if (isMissingSchema(err)) return unavailable;
+    throw err;
+  }
 }
 
 // Patentes por missões completadas na categoria
@@ -398,8 +434,54 @@ router.get('/smart-suggest/:missionId', auth, async (req, res) => {
 });
 
 // ============================================
+// COMUNIDADES RECOMENDADAS PARA UMA MISSÃO (sem IA)
+// GET /api/communities/recommended/:missionId
+// As da mesma área da missão; primeiro as com o assunto parecido (busca
+// simples por palavra no nome, na descrição e na categoria). Só a própria
+// missão (dono ou parceiro); a de outra pessoa dá 404, sem dizer se existe.
+// ============================================
+router.get('/recommended/:missionId', auth, async (req, res) => {
+  const userId = req.user.userId;
+  const missionId = parsePostId(req.params.missionId);
+  if (!missionId) return res.status(404).json({ error: RECOMMEND_NOT_FOUND_MESSAGE });
+  try {
+    const missionRes = await db.query(
+      `SELECT id, area, subject FROM missions
+       WHERE id = $1 AND (user_id = $2 OR partner_id = $2)`,
+      [missionId, userId]
+    );
+    const mission = missionRes.rows[0];
+    if (!mission) return res.status(404).json({ error: RECOMMEND_NOT_FOUND_MESSAGE });
+    if (mission.area == null) {
+      return res.json({ area: null, subject: mission.subject || null, communities: [], message: RECOMMEND_NO_AREA_MESSAGE });
+    }
+
+    const commRes = await db.query(
+      `SELECT c.id, c.name, c.slug, c.description, c.category, c.icon, c.cover_color,
+              c.is_default, c.member_count, c.area,
+              CASE WHEN cm.user_id IS NOT NULL THEN true ELSE false END AS is_member
+       FROM communities c
+       LEFT JOIN community_members cm
+         ON cm.community_id = c.id AND cm.user_id = $1
+       WHERE c.area = $2`,
+      [userId, mission.area]
+    );
+    res.json({
+      area: mission.area,
+      area_label: areaLabel(mission.area),
+      subject: mission.subject || null,
+      communities: rankBySubject(mission.subject, commRes.rows).slice(0, RECOMMEND_LIMIT)
+    });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: RECOMMEND_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    res.status(500).json({ error: 'Erro ao recomendar comunidades.' });
+  }
+});
+
+// ============================================
 // VER COMUNIDADE
 // GET /api/communities/:slug
+// Ler é aberto (18+): os posts vêm para todos, com ou sem missão.
 // ============================================
 router.get('/:slug', auth, async (req, res) => {
   const userId = req.user.userId;
@@ -417,8 +499,8 @@ router.get('/:slug', auth, async (req, res) => {
     );
 
     const community = commRes.rows[0];
-    const access = community ? getCommunityAccess(community) : null;
     if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
+    const access = getCommunityAccess(community, await checkPostAccess(userId, community));
 
     // Top 10 ranking
     const rankRes = await db.query(
@@ -538,9 +620,9 @@ router.post('/:slug/join', auth, async (req, res) => {
 // Body: { content }
 //
 // Ordem: filtro de crise → texto válido e até 280 caracteres → 18+
-// confirmado → comunidade →
-// membro com 1 missão concluída na categoria (regra que já existia) →
-// limite de posts por pessoa em 24 horas → grava.
+// confirmado → comunidade → membro → missão ATIVA da mesma área (decisão
+// de 26/11; antes era 1 missão concluída na categoria) → limite de posts
+// por pessoa em 24 horas → grava.
 // ============================================
 router.post('/:slug/posts', auth, async (req, res) => {
   const userId = req.user.userId;
@@ -588,19 +670,17 @@ router.post('/:slug/posts', auth, async (req, res) => {
       return res.status(403).json({ error: POST_NOT_MEMBER_MESSAGE });
     }
 
-    // Verificar se completou pelo menos uma missão nesta categoria
-    const completedRes = await db.query(
-      `SELECT COUNT(*) as total FROM missions
-       WHERE (user_id = $1 OR partner_id = $1)
-         AND category = $2
-         AND status = 'completed'`,
-      [userId, community.category]
-    );
-    const completed = parseInt(completedRes.rows[0].total);
-    if (completed === 0) {
+    // Missão ativa da mesma área. Antes da 013: 503 calmo, nada gravado.
+    const post = await checkPostAccess(userId, community);
+    if (post.unavailable) {
+      return res.status(503).json({ error: POST_AREAS_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    }
+    if (!post.ok) {
       return res.status(403).json({
-        error: POST_LOCKED_MESSAGE,
-        locked: true
+        error: post.message,
+        code: post.code,
+        locked: true,
+        community_area: community.area || null
       });
     }
 

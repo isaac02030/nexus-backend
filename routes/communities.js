@@ -24,6 +24,7 @@ const {
   shouldHide,
   hiddenMessage
 } = require('../lib/post-reports');
+const { MERIT_RULE, meritCountSql, titleFor, nextTitle } = require('../lib/merit');
 const router   = express.Router();
 
 // Posts do fórum: mesmo limite de tamanho da frase do check-in (280
@@ -53,7 +54,7 @@ const CREATE_DESCRIPTION_MAX = 200;
 // Contra spam: no máximo 1 comunidade criada por pessoa a cada 7 dias
 // (proposta; o número é fácil de trocar).
 const CREATE_PER_WEEK = 1;
-const CREATE_RESERVED_SLUGS = ['admin', 'suggest', 'smart-suggest', 'recommended'];
+const CREATE_RESERVED_SLUGS = ['admin', 'suggest', 'smart-suggest', 'recommended', 'merit'];
 const CREATE_CRISIS_MESSAGE = 'A comunidade não foi criada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
 const CREATE_LOCKED_MESSAGE = 'Criar uma comunidade abre depois que você concluir uma missão de 30 dias.';
 const CREATE_NAME_MESSAGE = `Dê um nome à comunidade, com até ${CREATE_NAME_MAX} caracteres.`;
@@ -99,6 +100,10 @@ const REPORT_OWN_POST_MESSAGE = 'Você não pode denunciar o seu próprio post.'
 const REPORT_DUPLICATE_MESSAGE = 'Você já denunciou este post. Uma denúncia por pessoa já basta, obrigado.';
 const REPORT_UNAVAILABLE_MESSAGE = 'A denúncia ainda não está disponível. Tente de novo mais tarde.';
 const REPORT_SERVER_ERROR_MESSAGE = 'Não deu para enviar a denúncia agora. Tente de novo daqui a pouco.';
+
+// Mérito e ranking (PR D). Textos para o sim do dono do projeto.
+const MERIT_SERVER_ERROR_MESSAGE = 'Não deu para abrir o mérito agora. Tente de novo daqui a pouco.';
+const RANKING_TOP = 3;
 
 // Moderação (só admin).
 const MOD_POST_NOT_FOUND_MESSAGE = 'Post não encontrado.';
@@ -526,6 +531,84 @@ router.get('/recommended/:missionId', auth, async (req, res) => {
 });
 
 // ============================================
+// MÉRITO E RANKING (PR D da comunidade; decisão de 27/11, títulos opção A)
+// GET /api/communities/merit/me      → o meu mérito (só o próprio; não há
+//                                      perfil dos outros)
+// GET /api/communities/:slug/ranking → os 3 primeiros + a minha posição
+// Contam só as missões pessoais de 30 dias concluídas (lib/merit.js).
+// O ranking mostra só apelido, título, missões e dias na comunidade; nunca
+// id, e-mail ou outra coisa. Quem não é membro, ou não tem missão que
+// conta, não entra.
+// ============================================
+router.get('/merit/me', auth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT ${meritCountSql('u.id')} AS missions FROM users u WHERE u.id = $1`,
+      [req.user.userId]
+    );
+    const missions = Number(result.rows[0]?.missions) || 0;
+    res.json({
+      missions,
+      title: titleFor(missions),
+      next: nextTitle(missions),
+      rule: MERIT_RULE
+    });
+  } catch (err) {
+    res.status(500).json({ error: MERIT_SERVER_ERROR_MESSAGE });
+  }
+});
+
+// Os 3 primeiros + quem pede. Ordem: missões desc, entrada na comunidade
+// asc, id do membro asc (determinística).
+async function communityRanking(communityId, userId) {
+  const result = await db.query(
+    `WITH members AS (
+       SELECT cm.id AS member_id, cm.user_id, cm.created_at AS joined_at, u.username,
+              ${meritCountSql('cm.user_id')} AS missions
+       FROM community_members cm
+       JOIN users u ON u.id = cm.user_id
+       WHERE cm.community_id = $1
+     ), ordered AS (
+       SELECT member_id, user_id, joined_at, username, missions,
+              ROW_NUMBER() OVER (ORDER BY missions DESC, joined_at ASC, member_id ASC) AS position
+       FROM members
+       WHERE missions > 0
+     )
+     SELECT position::int AS position, username, missions,
+            FLOOR(EXTRACT(EPOCH FROM (NOW()::timestamp - joined_at)) / 86400)::int AS days_in_community,
+            (user_id = $2) AS is_me
+     FROM ordered
+     WHERE position <= $3 OR user_id = $2
+     ORDER BY position`,
+    [communityId, userId, RANKING_TOP]
+  );
+  const rows = result.rows.map((row) => ({
+    position: Number(row.position),
+    username: row.username,
+    title: titleFor(row.missions),
+    missions: Number(row.missions) || 0,
+    days_in_community: Math.max(0, Number(row.days_in_community) || 0),
+    is_me: row.is_me === true
+  }));
+  return {
+    top: rows.filter((row) => row.position <= RANKING_TOP),
+    me: rows.find((row) => row.is_me) || null,
+    rule: MERIT_RULE
+  };
+}
+
+router.get('/:slug/ranking', auth, async (req, res) => {
+  try {
+    const commRes = await db.query('SELECT id FROM communities WHERE slug = $1', [req.params.slug]);
+    const community = commRes.rows[0];
+    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
+    res.json(await communityRanking(community.id, req.user.userId));
+  } catch (err) {
+    res.status(500).json({ error: MERIT_SERVER_ERROR_MESSAGE });
+  }
+});
+
+// ============================================
 // VER COMUNIDADE
 // GET /api/communities/:slug
 // Ler é aberto (18+): os posts vêm para todos, com ou sem missão.
@@ -549,16 +632,9 @@ router.get('/:slug', auth, async (req, res) => {
     if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
     const access = getCommunityAccess(community, await checkPostAccess(userId, community));
 
-    // Top 10 ranking
-    const rankRes = await db.query(
-      `SELECT cm.rank, cm.missions_done, cm.total_days, u.username
-       FROM community_members cm
-       JOIN users u ON cm.user_id = u.id
-       WHERE cm.community_id = $1
-       ORDER BY cm.missions_done DESC, cm.total_days DESC
-       LIMIT 10`,
-      [community.id]
-    );
+    // Ranking: os 3 primeiros + quem pede (antes eram os 10 primeiros, com
+    // a patente antiga e os dias, gravados na entrada e já velhos).
+    const ranking = await communityRanking(community.id, userId);
 
     // Posts recentes. Post escondido por denúncias some para todos, menos
     // para o autor, que o vê com hidden: true e o motivo. As colunas da
@@ -594,7 +670,7 @@ router.get('/:slug', auth, async (req, res) => {
 
     res.json({
       community,
-      ranking: rankRes.rows,
+      ranking,
       posts,
       access
     });

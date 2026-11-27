@@ -37,7 +37,8 @@ function resetDb() {
     { id: 4, slug: 'sem-area', name: 'Antiga', category: 'estudo', member_count: 1, area: null },
     { id: 5, slug: 'idiomas', name: 'Idiomas', description: 'Inglês, espanhol e outras línguas', category: 'idiomas', member_count: 9, is_default: true, area: 'mente' },
     { id: 6, slug: 'psicologia', name: 'Psicologia', description: 'Leituras de psicologia e filosofia', category: 'estudo', member_count: 2, area: 'mente' },
-    { id: 7, slug: 'corrida', name: 'Corrida', category: 'corrida', member_count: 30, is_default: true, area: 'corpo' }
+    { id: 7, slug: 'corrida', name: 'Corrida', category: 'corrida', member_count: 30, is_default: true, area: 'corpo' },
+    { id: 8, slug: 'alimentacao', name: 'Alimentação', category: 'alimentacao', member_count: 3, is_default: true, area: 'corpo' }
   ];
   db.members = [];
   db.completedMissions = new Map();
@@ -378,11 +379,42 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
     assert.deepEqual(q.params, [2]);
   });
 
-  test('só leitura / em breve: desligado por padrão (lista vazia)', () => {
+  test('só leitura: ligado só na Alimentação (decisão de 27/11)', () => {
     const { READ_ONLY_COMMUNITY_SLUGS, isReadOnlyCommunity } = require('../lib/community-access');
-    assert.deepEqual(READ_ONLY_COMMUNITY_SLUGS, []);
-    assert.equal(isReadOnlyCommunity('alimentacao'), false);
-    assert.equal(isReadOnlyCommunity('alimentacao', ['alimentacao']), true);
+    assert.deepEqual(READ_ONLY_COMMUNITY_SLUGS, ['alimentacao']);
+    assert.equal(isReadOnlyCommunity('alimentacao'), true);
+    assert.equal(isReadOnlyCommunity('corrida'), false);
+  });
+
+  test('negado: postar na Alimentação, mesmo com missão ativa de Corpo: 403 read_only, nada gravado', async () => {
+    makeMember(2, { areas: ['corpo'], communityId: 8 });
+    const res = await request('POST', '/api/communities/alimentacao/posts', {
+      token: tokenFor(2), body: { content: 'uma dica de almoço' }
+    });
+    assert.equal(res.status, 403);
+    assert.equal(res.body.code, 'read_only');
+    assert.equal(res.body.error, 'Os posts aqui abrem em breve. Por enquanto, dá para ler.');
+    assert.equal(insertedPost(), false);
+  });
+
+  test('ler a Alimentação funciona (com e sem missão), sem poder postar', async () => {
+    db.posts.push({ id: 1, community_id: 8, user_id: 9, content: 'dica antiga' });
+    makeMember(2, { areas: ['corpo'], communityId: 8 });
+    for (const user of [2, 5]) {
+      const res = await request('GET', '/api/communities/alimentacao', { token: tokenFor(user) });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.access.can_read_forum, true);
+      assert.equal(res.body.access.can_post_forum, false);
+      assert.equal(res.body.posts.length, 1);
+    }
+  });
+
+  test('outra comunidade de Corpo continua aberta para posts', async () => {
+    makeMember(2, { areas: ['corpo'], communityId: 7 });
+    const res = await request('POST', '/api/communities/corrida/posts', {
+      token: tokenFor(2), body: { content: 'corri 3 km' }
+    });
+    assert.equal(res.status, 201);
   });
 
   test('negado: com a comunidade na lista de só leitura, ninguém posta, mas lê', async () => {
@@ -403,7 +435,7 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
       assert.equal(read.body.access.can_post_forum, false);
       assert.equal(read.body.access.post_code, 'read_only');
     } finally {
-      READ_ONLY_COMMUNITY_SLUGS.length = 0;
+      READ_ONLY_COMMUNITY_SLUGS.splice(READ_ONLY_COMMUNITY_SLUGS.indexOf('foco'), 1);
     }
   });
 
@@ -418,7 +450,7 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
       assert.equal(res.body.crisis, true);
       assert.equal(insertedPost(), false);
     } finally {
-      READ_ONLY_COMMUNITY_SLUGS.length = 0;
+      READ_ONLY_COMMUNITY_SLUGS.splice(READ_ONLY_COMMUNITY_SLUGS.indexOf('foco'), 1);
     }
   });
 
@@ -518,7 +550,7 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
     db.missions.push({ id: 41, user_id: 2, partner_id: 3, area: 'corpo', subject: null });
     const res = await request('GET', '/api/communities/recommended/41', { token: tokenFor(3) });
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body.communities.map((c) => c.slug), ['corrida']);
+    assert.deepEqual(res.body.communities.map((c) => c.slug), ['corrida', 'alimentacao']);
   });
 
   test('negado: recomendadas da missão de outra pessoa: 404, sem dizer se existe', async () => {

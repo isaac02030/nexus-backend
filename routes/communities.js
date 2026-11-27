@@ -25,6 +25,10 @@ const {
   shouldHide,
   hiddenMessage
 } = require('../lib/post-reports');
+const {
+  PAGE_SIZE, CONTINUOUS_PAGE_SIZE, HIGHLIGHTS_MAX, HIGHLIGHTS_DAYS,
+  encodeCursor, decodeCursor, dayDone
+} = require('../lib/community-feed');
 const router   = express.Router();
 
 // Posts do fórum: mesmo limite de tamanho da frase do check-in (280
@@ -105,6 +109,14 @@ const REPORT_DUPLICATE_MESSAGE = 'Você já denunciou este post. Uma denúncia p
 const REPORT_UNAVAILABLE_MESSAGE = 'A denúncia ainda não está disponível. Tente de novo mais tarde.';
 const REPORT_SERVER_ERROR_MESSAGE = 'Não deu para enviar a denúncia agora. Tente de novo daqui a pouco.';
 
+// Apoios e lista por cursor (PR C, migração 015). Textos para o sim do dono.
+const SUPPORT_OWN_POST_MESSAGE = 'Você não pode apoiar o seu próprio post.';
+const SUPPORT_DUPLICATE_MESSAGE = 'Você já apoiou este post.';
+const SUPPORT_UNAVAILABLE_MESSAGE = 'O apoio ainda não está disponível. Tente de novo mais tarde.';
+const SUPPORT_SERVER_ERROR_MESSAGE = 'Não deu para concluir agora. Tente de novo daqui a pouco.';
+const FEED_UNAVAILABLE_MESSAGE = 'A lista de posts ainda não está disponível. Tente de novo mais tarde.';
+const FEED_CURSOR_MESSAGE = 'Não deu para carregar mais posts. Abra a comunidade de novo.';
+const FEED_SCROLL_HINT = 'Registre o dia para a lista rolar sozinha.';
 
 // Moderação (só admin).
 const MOD_POST_NOT_FOUND_MESSAGE = 'Post não encontrado.';
@@ -682,6 +694,229 @@ router.get('/:slug', auth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao obter comunidade.' });
+  }
+});
+
+// ============================================
+// APOIOS, DESTAQUES E LISTA POR CURSOR (PR C da comunidade, migração 015)
+// GET    /api/communities/:slug/posts?cursor=…             → página de posts
+// GET    /api/communities/:slug/highlights                 → até 3 da semana
+// POST   /api/communities/:slug/posts/:postId/support      → apoiar
+// DELETE /api/communities/:slug/posts/:postId/support      → tirar o apoio
+// Ler é aberto (18+). Apoiar: 18+, post visível, não o próprio, 1 por pessoa
+// (UNIQUE). Só o total aparece; ninguém vê quem apoiou. Apoiar não dá moeda.
+// Antes da 015: 503 calmo (a página GET /:slug continua funcionando).
+// ============================================
+
+// O dia de hoje está cumprido? (lib/community-feed.js). Qualquer falha:
+// não cumprido, e a lista fica com o botão «Ver anteriores».
+async function loadDayDone(userId) {
+  try {
+    const clockRes = await db.query(
+      `SELECT to_char(reminder_time, 'HH24:MI') AS reminder_time, timezone
+       FROM users WHERE id = $1`,
+      [userId]
+    );
+    const missionsRes = await db.query(
+      `SELECT * FROM missions
+       WHERE (user_id = $1 OR partner_id = $1)
+         AND status = 'active'`,
+      [userId]
+    );
+    const missions = missionsRes.rows;
+    if (!missions.length) return false;
+    const doneRes = await db.query(
+      `SELECT mission_id, day_number FROM checkins
+       WHERE user_id = $1 AND completed = true AND mission_id = ANY($2::int[])`,
+      [userId, missions.map((m) => Number(m.id))]
+    );
+    const doneDays = new Map();
+    for (const row of doneRes.rows) {
+      const key = Number(row.mission_id);
+      if (!doneDays.has(key)) doneDays.set(key, new Set());
+      doneDays.get(key).add(Number(row.day_number));
+    }
+    return dayDone(missions, clockRes.rows[0] || {}, doneDays);
+  } catch (err) {
+    return false;
+  }
+}
+
+function visiblePost(post) {
+  const { cursor_time: _, ...rest } = post;
+  if (!rest.hidden) {
+    const { hidden_reason: __, ...visible } = rest;
+    return visible;
+  }
+  return {
+    ...rest,
+    hidden_reason_label: reasonLabel(rest.hidden_reason),
+    hidden_message: hiddenMessage(rest.hidden_reason)
+  };
+}
+
+router.get('/:slug/posts', auth, async (req, res) => {
+  const userId = req.user.userId;
+  let cursor = null;
+  if (req.query.cursor !== undefined) {
+    cursor = decodeCursor(req.query.cursor);
+    if (!cursor) return res.status(400).json({ error: FEED_CURSOR_MESSAGE, code: 'invalid_cursor' });
+  }
+  try {
+    const commRes = await db.query('SELECT id, slug FROM communities WHERE slug = $1', [req.params.slug]);
+    const community = commRes.rows[0];
+    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
+
+    const continuous = await loadDayDone(userId);
+    const pageSize = continuous ? CONTINUOUS_PAGE_SIZE : PAGE_SIZE;
+    const postsRes = await db.query(
+      `SELECT cp.id, cp.community_id, cp.user_id, cp.content, cp.created_at,
+              cp.created_at::text AS cursor_time, u.username,
+              (to_jsonb(cp) ->> 'hidden_at') IS NOT NULL AS hidden,
+              CASE WHEN cp.user_id = $2 THEN to_jsonb(cp) ->> 'hidden_reason' END AS hidden_reason,
+              (SELECT COUNT(*)::int FROM community_post_supports s WHERE s.post_id = cp.id) AS supports,
+              EXISTS (
+                SELECT 1 FROM community_post_supports s2
+                WHERE s2.post_id = cp.id AND s2.user_id = $2
+              ) AS supported_by_me
+       FROM community_posts cp
+       JOIN users u ON cp.user_id = u.id
+       WHERE cp.community_id = $1
+         AND ((to_jsonb(cp) ->> 'hidden_at') IS NULL OR cp.user_id = $2)
+         AND ($3::timestamp IS NULL OR (cp.created_at, cp.id) < ($3::timestamp, $4::int))
+       ORDER BY cp.created_at DESC, cp.id DESC
+       LIMIT $5`,
+      [community.id, userId, cursor ? cursor.createdAt : null, cursor ? cursor.id : null, pageSize + 1]
+    );
+    const rows = postsRes.rows.slice(0, pageSize);
+    const last = rows[rows.length - 1];
+    const nextCursor = postsRes.rows.length > pageSize && last ? encodeCursor(last.cursor_time, last.id) : null;
+    res.json({
+      posts: rows.map(visiblePost),
+      next_cursor: nextCursor,
+      page_size: pageSize,
+      continuous_scroll: continuous,
+      scroll_hint: continuous ? null : FEED_SCROLL_HINT
+    });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: FEED_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    res.status(500).json({ error: SUPPORT_SERVER_ERROR_MESSAGE });
+  }
+});
+
+router.get('/:slug/highlights', auth, async (req, res) => {
+  const userId = req.user.userId;
+  try {
+    const commRes = await db.query('SELECT id, slug FROM communities WHERE slug = $1', [req.params.slug]);
+    const community = commRes.rows[0];
+    if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' });
+    // Post escondido não entra, nem para o autor. Só apoios dos últimos 7 dias.
+    const result = await db.query(
+      `SELECT cp.id, cp.community_id, cp.user_id, cp.content, cp.created_at, u.username,
+              COUNT(s.id)::int AS week_supports,
+              (SELECT COUNT(*)::int FROM community_post_supports s3 WHERE s3.post_id = cp.id) AS supports,
+              EXISTS (
+                SELECT 1 FROM community_post_supports s2
+                WHERE s2.post_id = cp.id AND s2.user_id = $2
+              ) AS supported_by_me
+       FROM community_posts cp
+       JOIN users u ON cp.user_id = u.id
+       JOIN community_post_supports s
+         ON s.post_id = cp.id AND s.created_at > NOW() - ($3::int * INTERVAL '1 day')
+       WHERE cp.community_id = $1
+         AND (to_jsonb(cp) ->> 'hidden_at') IS NULL
+       GROUP BY cp.id, u.username
+       ORDER BY week_supports DESC, cp.created_at DESC, cp.id DESC
+       LIMIT $4`,
+      [community.id, userId, HIGHLIGHTS_DAYS, HIGHLIGHTS_MAX]
+    );
+    res.json({ highlights: result.rows, days: HIGHLIGHTS_DAYS, max: HIGHLIGHTS_MAX });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: FEED_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    res.status(500).json({ error: SUPPORT_SERVER_ERROR_MESSAGE });
+  }
+});
+
+// Post que pode receber apoio: existe, é desta comunidade e não está escondido.
+async function supportTarget(req, res) {
+  const postId = parsePostId(req.params.postId);
+  if (!postId) {
+    res.status(404).json({ error: REPORT_POST_NOT_FOUND_MESSAGE });
+    return null;
+  }
+  const commRes = await db.query('SELECT id, slug FROM communities WHERE slug = $1', [req.params.slug]);
+  const community = commRes.rows[0];
+  if (!community) {
+    res.status(404).json({ error: 'Comunidade não encontrada.' });
+    return null;
+  }
+  if (isReadOnlyCommunity(community.slug)) {
+    res.status(403).json({ error: READ_ONLY_MESSAGE, code: 'read_only' });
+    return null;
+  }
+  const postRes = await db.query(
+    `SELECT cp.id, cp.user_id, (to_jsonb(cp) ->> 'hidden_at') IS NOT NULL AS hidden
+     FROM community_posts cp
+     WHERE cp.id = $1 AND cp.community_id = $2`,
+    [postId, community.id]
+  );
+  const post = postRes.rows[0];
+  if (!post || post.hidden) {
+    res.status(404).json({ error: REPORT_POST_NOT_FOUND_MESSAGE });
+    return null;
+  }
+  return post;
+}
+
+async function supportTotal(postId) {
+  const result = await db.query(
+    'SELECT COUNT(*)::int AS total FROM community_post_supports WHERE post_id = $1',
+    [postId]
+  );
+  return Number(result.rows[0]?.total) || 0;
+}
+
+router.post('/:slug/posts/:postId/support', auth, async (req, res) => {
+  const userId = req.user.userId;
+  try {
+    const post = await supportTarget(req, res);
+    if (!post) return;
+    if (Number(post.user_id) === Number(userId)) {
+      return res.status(403).json({ error: SUPPORT_OWN_POST_MESSAGE, code: 'own_post' });
+    }
+    // UNIQUE (post_id, user_id): dois pedidos ao mesmo tempo gravam um só.
+    const inserted = await db.query(
+      `INSERT INTO community_post_supports (post_id, user_id)
+       VALUES ($1, $2)
+       ON CONFLICT (post_id, user_id) DO NOTHING
+       RETURNING id`,
+      [post.id, userId]
+    );
+    const supports = await supportTotal(post.id);
+    if (inserted.rowCount !== 1) {
+      return res.status(409).json({ error: SUPPORT_DUPLICATE_MESSAGE, code: 'already_supported', supported: true, supports });
+    }
+    res.status(201).json({ supported: true, supports });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: SUPPORT_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    res.status(500).json({ error: SUPPORT_SERVER_ERROR_MESSAGE });
+  }
+});
+
+router.delete('/:slug/posts/:postId/support', auth, async (req, res) => {
+  const userId = req.user.userId;
+  try {
+    const post = await supportTarget(req, res);
+    if (!post) return;
+    const removed = await db.query(
+      'DELETE FROM community_post_supports WHERE post_id = $1 AND user_id = $2 RETURNING id',
+      [post.id, userId]
+    );
+    const supports = await supportTotal(post.id);
+    res.json({ supported: false, removed: removed.rowCount === 1, supports });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: SUPPORT_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    res.status(500).json({ error: SUPPORT_SERVER_ERROR_MESSAGE });
   }
 });
 

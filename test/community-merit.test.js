@@ -7,6 +7,8 @@ const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
 const { withAuthDb } = require('./helpers/auth-db');
+const { ownOrDuoMissionSql } = require('../lib/mission-participation');
+const RULE_TEXT = (who, alias) => String(ownOrDuoMissionSql(who, alias)).replace(/\s+/g, ' ').trim();
 
 process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
@@ -39,7 +41,12 @@ describe('títulos (opção A)', () => {
   test('o que conta: só missões pessoais, concluídas, de 30 dias ou mais (dono ou parceiro)', () => {
     const sql = normalize(merit.meritCountSql('cm.user_id'));
     assert.match(sql, /^\(SELECT COUNT\(\*\)::int FROM missions mm /);
-    assert.match(sql, /\(mm\.user_id = cm\.user_id OR \(mm\.partner_id = cm\.user_id AND COALESCE\(mm\.mode, ''\) <> 'rival' AND NOT EXISTS \( SELECT 1 FROM mission_matches mx WHERE mx\.mission_a_id = mm\.id OR mx\.mission_b_id = mm\.id \)\)\)/);
+    assert.ok(sql.includes(RULE_TEXT('cm.user_id', 'mm')), 'regra de quem participa');
+    // Par por mission_matches: só exclui o par cruzado (o outro lado é da
+    // própria pessoa), sem olhar o status (2.ª leitura do Argos).
+    assert.match(sql, /JOIN missions mo ON mo\.id = CASE WHEN mx\.mission_a_id = mm\.id THEN mx\.mission_b_id ELSE mx\.mission_a_id END/);
+    assert.match(sql, /AND mo\.user_id = cm\.user_id \)/);
+    assert.doesNotMatch(sql, /mx\.status/);
     assert.match(sql, /mm\.status = 'completed'/);
     assert.match(sql, /mm\.duration_days >= 30\)$/);
     // A Maratona vive em community_missions: fora da conta.

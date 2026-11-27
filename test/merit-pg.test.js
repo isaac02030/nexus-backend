@@ -111,6 +111,37 @@ test('Postgres: missão do rival não é da pessoa (mérito, post e rolagem); Du
   const feed = await (await fetch(`${base}/api/communities/corrida/posts`, { headers: as8 })).json();
   assert.equal(feed.continuous_scroll, false, 'o dia livre do rival não libera a rolagem');
   assert.equal(feed.page_size, 10);
+  // ---- Par por mission_matches CONCLUÍDO (o par segue 'active', cruzado): 1 para cada ----
+  await q(`INSERT INTO users (id, username, email, password, adult_confirmed_at) VALUES
+           (10,'pa','pa@exemplo.test','x',NOW()), (11,'pb','pb@exemplo.test','x',NOW()),
+           (12,'dono2','dono2@exemplo.test','x',NOW()), (13,'antigo','antigo@exemplo.test','x',NOW()),
+           (14,'novo','novo@exemplo.test','x',NOW())`);
+  const ma = await mission(10, 11, 'parceiro');
+  const mb = await mission(11, 10, 'parceiro');
+  await q(`INSERT INTO mission_matches (mission_a_id, mission_b_id, mode, status) VALUES ($1, $2, 'parceiro', 'active')`, [ma, mb]);
+  assert.deepEqual([await count(10), await count(11)], [1, 1], 'par concluído não conta em dobro');
+
+  // ---- Par antigo ENCERRADO com outra pessoa + Duo novo por convite ----
+  // dono2 (12) teve par com antigo (13), encerrado (partner zerado); depois
+  // novo (14) entrou por convite de Duo na MESMA missão.
+  const antigo = (await q(`INSERT INTO missions (user_id, title, category, mode, status, duration_days)
+                           VALUES (13, 't', 'c', 'solo', 'completed', 30) RETURNING id`)).rows[0].id;
+  const doneDuo = await mission(12, 14, 'parceiro');
+  await q(`INSERT INTO mission_matches (mission_a_id, mission_b_id, mode, status) VALUES ($1, $2, 'parceiro', 'ended')`, [doneDuo, antigo]);
+  assert.deepEqual([await count(12), await count(13), await count(14)], [1, 1, 1], 'o parceiro novo conta 1');
+  // Versão ativa: o parceiro novo posta (área da missão) e rola (dia livre dela).
+  const antigoAtiva = (await q(`INSERT INTO missions (user_id, title, category, mode, status)
+                                VALUES (13, 't', 'c', 'solo', 'active') RETURNING id`)).rows[0].id;
+  const duoAtivo = (await q(`INSERT INTO missions (user_id, partner_id, title, category, mode, status, area, started_at, mission_weekdays)
+                             VALUES (12, 14, 't', 'c', 'parceiro', 'active', 'corpo', NOW() - INTERVAL '2 days', $1::smallint[]) RETURNING id`, [notToday])).rows[0].id;
+  await q(`INSERT INTO mission_matches (mission_a_id, mission_b_id, mode, status) VALUES ($1, $2, 'parceiro', 'ended')`, [duoAtivo, antigoAtiva]);
+  await q(`INSERT INTO community_members (community_id, user_id) VALUES ($1, 14)`, [corrida]);
+  const as14 = { Authorization: `Bearer ${jwt.sign({ userId: 14 }, process.env.JWT_SECRET)}`, 'Content-Type': 'application/json' };
+  const post14 = await fetch(`${base}/api/communities/corrida/posts`, { method: 'POST', headers: as14, body: JSON.stringify({ content: 'treino feito' }) });
+  assert.equal(post14.status, 201, 'o parceiro do Duo novo posta');
+  const feed14 = await (await fetch(`${base}/api/communities/corrida/posts`, { headers: as14 })).json();
+  assert.equal(feed14.continuous_scroll, true, 'o parceiro do Duo novo rola (dia livre da missão do Duo)');
+
   // Controle: a própria rival2, em dia livre, ganha a rolagem.
   const as9 = { Authorization: `Bearer ${jwt.sign({ userId: 9 }, process.env.JWT_SECRET)}` };
   const own = await (await fetch(`${base}/api/communities/corrida/posts`, { headers: as9 })).json();

@@ -9,6 +9,8 @@ const jwt = require('jsonwebtoken');
 const express = require('express');
 const { Pool } = require('pg');
 const { withAuthDb } = require('./helpers/auth-db');
+const { ownOrDuoMissionSql } = require('../lib/mission-participation');
+const RULE_TEXT = (who, alias) => String(ownOrDuoMissionSql(who, alias)).replace(/\s+/g, ' ').trim();
 
 process.env.JWT_SECRET = 'teste-apenas-local';
 process.env.DATABASE_URL = 'postgres://127.0.0.1:5432/nexus_teste';
@@ -149,7 +151,7 @@ function handle(sql, params = []) {
   if (/^SELECT to_char\(reminder_time, 'HH24:MI'\) AS reminder_time, timezone FROM users WHERE id = \$1$/.test(text)) {
     return { rows: [{ reminder_time: '08:00', timezone: 'Europe/Lisbon' }] };
   }
-  if (/^SELECT m\.\* FROM missions m WHERE \(m\.user_id = \$1 OR \(m\.partner_id = \$1 AND COALESCE\(m\.mode, ''\) <> 'rival' AND NOT EXISTS \( SELECT 1 FROM mission_matches mx WHERE mx\.mission_a_id = m\.id OR mx\.mission_b_id = m\.id \)\)\) AND m\.status = 'active'$/.test(text)) {
+  if (text === `SELECT m.* FROM missions m WHERE ${RULE_TEXT('$1', 'm')} AND m.status = 'active'`) {
     return { rows: db.missions };
   }
   if (/^SELECT mission_id, day_number FROM checkins WHERE user_id = \$1 AND completed = true AND mission_id = ANY\(\$2::int\[\]\)$/.test(text)) {

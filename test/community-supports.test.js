@@ -304,6 +304,8 @@ describe('apoios, destaques e lista', { concurrency: 1 }, () => {
     assert.equal(res.body.scroll_hint, 'Registre o dia para a lista rolar sozinha.');
     assert.deepEqual(feed.decodeCursor(res.body.next_cursor), { createdAt: '2026-11-27 08:00:50.000001', id: 21 });
     assert.equal(res.body.posts[0].cursor_time, undefined);
+    assert.equal(res.body.posts[0].author_title, null);
+    assert.equal(res.body.posts[0].author_missions, undefined);
     const q = db.queries.find((item) => /ORDER BY cp\.created_at DESC, cp\.id DESC LIMIT \$5$/.test(item.text));
     assert.deepEqual(q.params, [3, 5, null, null, 11]);
     assert.doesNotMatch(q.text, /OFFSET/);
@@ -342,10 +344,15 @@ describe('apoios, destaques e lista', { concurrency: 1 }, () => {
   });
 
   test('destaques: até 3, só apoios dos últimos 7 dias, post escondido fica de fora', async () => {
-    db.highlights = [{ id: 10, week_supports: 4, supports: 6, supported_by_me: false }];
+    db.highlights = [{ id: 10, week_supports: 4, supports: 6, supported_by_me: false, author_missions: 3 }];
     const res = await call('GET', '/api/communities/foco/highlights');
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body, { highlights: db.highlights, days: 7, max: 3 });
+    // Título do autor (PR D): nome e nível, sem o número cru.
+    assert.deepEqual(res.body, {
+      highlights: [{ id: 10, week_supports: 4, supports: 6, supported_by_me: false, author_title: { name: 'Praticante', level: 2, marks: 5 } }],
+      days: 7,
+      max: 3
+    });
     const q = db.queries.find((item) => /JOIN community_post_supports s ON/.test(item.text));
     assert.match(q.text, /AND \(to_jsonb\(cp\) ->> 'hidden_at'\) IS NULL GROUP BY/);
     assert.match(q.text, /s\.created_at > NOW\(\) - \(\$3::int \* INTERVAL '1 day'\)/);

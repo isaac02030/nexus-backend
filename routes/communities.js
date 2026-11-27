@@ -742,8 +742,13 @@ async function loadDayDone(userId) {
   }
 }
 
+// Título do autor (PR D): só o nome e o nível; o número cru não sai.
+function withAuthorTitle({ author_missions: authorMissions, ...row }) {
+  return { ...row, author_title: titleFor(authorMissions) };
+}
+
 function visiblePost(post) {
-  const { cursor_time: _, ...rest } = post;
+  const { cursor_time: _, ...rest } = withAuthorTitle(post);
   if (!rest.hidden) {
     const { hidden_reason: __, ...visible } = rest;
     return visible;
@@ -778,7 +783,8 @@ router.get('/:slug/posts', auth, async (req, res) => {
               EXISTS (
                 SELECT 1 FROM community_post_supports s2
                 WHERE s2.post_id = cp.id AND s2.user_id = $2
-              ) AS supported_by_me
+              ) AS supported_by_me,
+              ${meritCountSql('cp.user_id')} AS author_missions
        FROM community_posts cp
        JOIN users u ON cp.user_id = u.id
        WHERE cp.community_id = $1
@@ -818,7 +824,8 @@ router.get('/:slug/highlights', auth, async (req, res) => {
               EXISTS (
                 SELECT 1 FROM community_post_supports s2
                 WHERE s2.post_id = cp.id AND s2.user_id = $2
-              ) AS supported_by_me
+              ) AS supported_by_me,
+              ${meritCountSql('cp.user_id')} AS author_missions
        FROM community_posts cp
        JOIN users u ON cp.user_id = u.id
        JOIN community_post_supports s
@@ -830,7 +837,7 @@ router.get('/:slug/highlights', auth, async (req, res) => {
        LIMIT $4`,
       [community.id, userId, HIGHLIGHTS_DAYS, HIGHLIGHTS_MAX]
     );
-    res.json({ highlights: result.rows, days: HIGHLIGHTS_DAYS, max: HIGHLIGHTS_MAX });
+    res.json({ highlights: result.rows.map(withAuthorTitle), days: HIGHLIGHTS_DAYS, max: HIGHLIGHTS_MAX });
   } catch (err) {
     if (isMissingSchema(err)) return res.status(503).json({ error: FEED_UNAVAILABLE_MESSAGE, code: 'unavailable' });
     res.status(500).json({ error: SUPPORT_SERVER_ERROR_MESSAGE });

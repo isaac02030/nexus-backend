@@ -119,6 +119,11 @@ const FEED_UNAVAILABLE_MESSAGE = 'A lista de posts ainda não está disponível.
 const FEED_CURSOR_MESSAGE = 'Não deu para carregar mais posts. Abra a comunidade de novo.';
 const FEED_SCROLL_HINT = 'Registre o dia para a lista rolar sozinha.';
 
+// Saída da comunidade: a pessoa sai só de si mesma. Os posts ficam.
+const LEAVE_NOT_MEMBER_MESSAGE = 'Você já não participa desta comunidade.';
+const LEAVE_OWNER_MESSAGE = 'Você cuida desta comunidade. Não dá para sair enquanto for a pessoa responsável por ela.';
+const LEAVE_SERVER_ERROR_MESSAGE = 'Não deu para sair agora. Tente de novo daqui a pouco.';
+
 // Moderação (só admin).
 const MOD_POST_NOT_FOUND_MESSAGE = 'Post não encontrado.';
 const MOD_NOT_HIDDEN_MESSAGE = 'Este post não está escondido.';
@@ -985,6 +990,77 @@ router.post('/:slug/join', auth, async (req, res) => {
 
   } catch (err) {
     res.status(500).json({ error: 'Erro ao entrar na comunidade.' });
+  }
+});
+
+// ============================================
+// SAIR DA COMUNIDADE
+// DELETE /api/communities/:slug/members/me
+// O id vem do token: ninguém tira outra pessoa. Os posts ficam onde estão.
+// Quem criou a comunidade não sai enquanto for a pessoa responsável.
+// ============================================
+router.delete('/:slug/members/me', auth, async (req, res) => {
+  const userId = req.user.userId;
+  let client;
+  try {
+    client = await db.connect();
+    await client.query('BEGIN');
+
+    const commRes = await client.query(
+      'SELECT id, created_by FROM communities WHERE slug = $1',
+      [req.params.slug]
+    );
+    const community = commRes.rows[0];
+    if (!community) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Comunidade não encontrada.' });
+    }
+
+    if (community.created_by != null && Number(community.created_by) === Number(userId)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: LEAVE_OWNER_MESSAGE, code: 'owner' });
+    }
+
+    const memberRes = await client.query(
+      'SELECT id FROM community_members WHERE community_id = $1 AND user_id = $2',
+      [community.id, userId]
+    );
+    if (!memberRes.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: LEAVE_NOT_MEMBER_MESSAGE, code: 'not_member' });
+    }
+
+    // Sai também da maratona desta comunidade. Os dias já marcados ficam:
+    // continuam contando no total do grupo.
+    await client.query(
+      `DELETE FROM community_mission_participants
+       WHERE user_id = $1
+         AND community_mission_id IN (
+           SELECT id FROM community_missions WHERE community_id = $2
+         )`,
+      [userId, community.id]
+    );
+
+    const removed = await client.query(
+      'DELETE FROM community_members WHERE community_id = $1 AND user_id = $2',
+      [community.id, userId]
+    );
+    if (removed.rowCount === 1) {
+      await client.query(
+        'UPDATE communities SET member_count = GREATEST(member_count - 1, 0) WHERE id = $1',
+        [community.id]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.json({ success: true, left: true, removed: removed.rowCount === 1 });
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* já desfeito */ }
+    }
+    res.status(500).json({ error: LEAVE_SERVER_ERROR_MESSAGE });
+  } finally {
+    if (client) client.release();
   }
 });
 

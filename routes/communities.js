@@ -124,6 +124,33 @@ const LEAVE_NOT_MEMBER_MESSAGE = 'Você já não participa desta comunidade.';
 const LEAVE_OWNER_MESSAGE = 'Você cuida desta comunidade. Não dá para sair enquanto for a pessoa responsável por ela.';
 const LEAVE_SERVER_ERROR_MESSAGE = 'Não deu para sair agora. Tente de novo daqui a pouco.';
 
+// Comentários nos posts (migração 018). Mesmo limite de texto do post e,
+// por pessoa, no máximo 10 comentários em 24 horas somando comunidades.
+// A crise vem antes de tudo: o texto não é gravado nem escrito em log.
+const COMMENT_MAX_CHARS = NOTE_MAX_CHARS;
+const COMMENTS_PER_DAY = 10;
+const COMMENT_CRISIS_MESSAGE = 'Seu comentário não foi enviado. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
+const COMMENT_NOT_TEXT_MESSAGE = 'O comentário precisa ser um texto. Escreva de novo e envie.';
+const COMMENT_EMPTY_MESSAGE = 'O comentário está vazio. Escreva alguma coisa e envie.';
+const COMMENT_TOO_LONG_MESSAGE = `O comentário passou de ${COMMENT_MAX_CHARS} caracteres. Encurte um pouco e envie de novo.`;
+const COMMENT_NOT_MEMBER_MESSAGE = 'Só membros desta comunidade podem comentar. Entre na comunidade e tente de novo.';
+const COMMENT_READ_ONLY_MESSAGE = 'Esta comunidade é só para leitura. Não dá para comentar.';
+const COMMENT_RATE_LIMIT_MESSAGE = `Você já enviou ${COMMENTS_PER_DAY} comentários nas últimas 24 horas. Tente de novo mais tarde.`;
+const COMMENT_UNAVAILABLE_MESSAGE = 'Os comentários ainda não estão disponíveis. Tente de novo mais tarde.';
+const COMMENT_SERVER_ERROR_MESSAGE = 'Não deu para concluir agora. Tente de novo daqui a pouco.';
+const COMMENT_POST_NOT_FOUND_MESSAGE = 'Post não encontrado. Ele pode ter sido apagado.';
+const COMMENT_NOT_FOUND_MESSAGE = 'Comentário não encontrado. Ele pode ter sido apagado.';
+const COMMENT_OWN_REPORT_MESSAGE = 'Você não pode denunciar o seu próprio comentário.';
+const COMMENT_DUPLICATE_REPORT_MESSAGE = 'Você já denunciou este comentário. Uma denúncia por pessoa já basta, obrigado.';
+const COMMENT_REPORT_DONE_MESSAGE = 'Obrigado. Sua denúncia foi registrada.';
+const COMMENT_REPORT_CRISIS_SAVED_MESSAGE = 'Sua denúncia foi registrada, sem o texto que você escreveu. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
+const COMMENT_REPORT_CRISIS_NOT_SENT_MESSAGE = 'Sua denúncia não foi enviada. Se você está passando por um momento difícil, veja os contatos de ajuda abaixo.';
+const COMMENT_DETAILS_NOT_TEXT_MESSAGE = 'O texto da denúncia precisa ser um texto. Escreva de novo e envie.';
+const COMMENT_DETAILS_TOO_LONG_MESSAGE = `O texto da denúncia passou de ${NOTE_MAX_CHARS} caracteres. Encurte um pouco e envie de novo.`;
+const COMMENT_SUPPORT_OWN_MESSAGE = 'Você não pode apoiar o seu próprio comentário.';
+const COMMENT_SUPPORT_DUPLICATE_MESSAGE = 'Você já apoiou este comentário.';
+const COMMENTS_MAX_SHOWN = 100;
+
 // Moderação (só admin).
 const MOD_POST_NOT_FOUND_MESSAGE = 'Post não encontrado.';
 const MOD_NOT_HIDDEN_MESSAGE = 'Este post não está escondido.';
@@ -1344,6 +1371,429 @@ router.post('/:slug/posts/:postId/report', auth, async (req, res) => {
     refuse(500, { error: REPORT_SERVER_ERROR_MESSAGE });
   } finally {
     if (client) client.release();
+  }
+});
+
+// ============================================
+// COMENTÁRIOS NOS POSTS (migração 018)
+// GET    /api/communities/:slug/posts/:postId/comments               → lista
+// POST   /api/communities/:slug/posts/:postId/comments               → escreve
+// POST   /api/communities/:slug/posts/:postId/comments/:commentId/report
+// POST   /api/communities/:slug/posts/:postId/comments/:commentId/support
+// DELETE /api/communities/:slug/posts/:postId/comments/:commentId/support
+//
+// Ler é aberto (18+), como o feed. Escrever exige membro, comunidade não
+// só de leitura e missão ATIVA da área (a mesma porta de publicar). A crise
+// vem antes de tudo e nunca grava nem loga o texto. Cota de 10 comentários
+// em 24 horas por pessoa, contada e gravada na mesma transação.
+// Denúncia e esconder seguem as regras dos posts: 3 pessoas, ou 1 "perigoso"
+// dentro da cota de 3 por dia; apoio é 1 por pessoa, só o total aparece.
+// Antes da 018: 503 calmo, sem quebrar o resto da tela.
+// ============================================
+
+function commentHiddenMessage(code) {
+  const label = reasonLabel(code);
+  const motivo = label ? ` Motivo mais citado: ${label.toLowerCase()}.` : '';
+  return `Seu comentário foi escondido depois de algumas denúncias.${motivo} Ele não foi apagado: a equipe do Nexus vai conferir.`;
+}
+
+// O autor vê o próprio comentário escondido com o motivo; os outros não veem.
+// Nenhuma resposta leva user_id: a tela só recebe is_mine.
+function visibleComment(row, userId) {
+  const { user_id, hidden_reason, ...rest } = row;
+  const visivel = { ...rest, is_mine: isMine(user_id, userId) };
+  if (!visivel.hidden) return visivel;
+  return {
+    ...visivel,
+    hidden_reason_label: reasonLabel(hidden_reason),
+    hidden_message: commentHiddenMessage(hidden_reason)
+  };
+}
+
+// Post que pode receber comentários: existe, é desta comunidade e não está
+// escondido. Responde 404 genérico para não mostrar post alheio.
+async function commentPostTarget(req, res) {
+  const postId = parsePostId(req.params.postId);
+  if (!postId) {
+    res.status(404).json({ error: COMMENT_POST_NOT_FOUND_MESSAGE });
+    return null;
+  }
+  const commRes = await db.query('SELECT id, slug FROM communities WHERE slug = $1', [req.params.slug]);
+  const community = commRes.rows[0];
+  if (!community) {
+    res.status(404).json({ error: 'Comunidade não encontrada.' });
+    return null;
+  }
+  const postRes = await db.query(
+    `SELECT cp.id, cp.user_id, (to_jsonb(cp) ->> 'hidden_at') IS NOT NULL AS hidden
+     FROM community_posts cp
+     WHERE cp.id = $1 AND cp.community_id = $2`,
+    [postId, community.id]
+  );
+  const post = postRes.rows[0];
+  if (!post || post.hidden) {
+    res.status(404).json({ error: COMMENT_POST_NOT_FOUND_MESSAGE });
+    return null;
+  }
+  return { community, post };
+}
+
+router.get('/:slug/posts/:postId/comments', auth, async (req, res) => {
+  try {
+    const target = await commentPostTarget(req, res);
+    if (!target) return;
+    const result = await db.query(
+      `SELECT cc.id, cc.post_id, cc.content, cc.created_at, cc.user_id, u.username,
+              (to_jsonb(cc) ->> 'hidden_at') IS NOT NULL AS hidden,
+              CASE WHEN cc.user_id = $2 THEN to_jsonb(cc) ->> 'hidden_reason' END AS hidden_reason,
+              (SELECT COUNT(*)::int FROM community_comment_supports s WHERE s.comment_id = cc.id) AS supports,
+              EXISTS (
+                SELECT 1 FROM community_comment_supports s2
+                WHERE s2.comment_id = cc.id AND s2.user_id = $2
+              ) AS supported_by_me
+       FROM community_comments cc
+       JOIN users u ON cc.user_id = u.id
+       WHERE cc.post_id = $1
+         AND ((to_jsonb(cc) ->> 'hidden_at') IS NULL OR cc.user_id = $2)
+       ORDER BY cc.created_at ASC, cc.id ASC
+       LIMIT $3`,
+      [target.post.id, req.user.userId, COMMENTS_MAX_SHOWN]
+    );
+    res.json({
+      comments: result.rows.map((row) => visibleComment(row, req.user.userId)),
+      max: COMMENTS_MAX_SHOWN
+    });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: COMMENT_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    res.status(500).json({ error: COMMENT_SERVER_ERROR_MESSAGE });
+  }
+});
+
+router.post('/:slug/posts/:postId/comments', auth, async (req, res) => {
+  const userId = req.user.userId;
+  const content = req.body?.content;
+
+  // Filtro antes de qualquer validação ou gravação: sem texto no banco,
+  // sem texto em log, sem ida para a IA. A tela abre a ajuda com crisis.
+  const crisisLevel = typeof content === 'string' ? classifyNote(content) : null;
+  if (crisisLevel) {
+    return res.status(200).json({
+      commented: false,
+      crisis: true,
+      crisis_level: crisisLevel,
+      message: COMMENT_CRISIS_MESSAGE
+    });
+  }
+
+  if (content != null && typeof content !== 'string') {
+    return res.status(400).json({ error: COMMENT_NOT_TEXT_MESSAGE });
+  }
+  const text = (content || '').trim();
+  if (!text) return res.status(400).json({ error: COMMENT_EMPTY_MESSAGE });
+  if (noteLength(text) > COMMENT_MAX_CHARS) {
+    return res.status(400).json({ error: COMMENT_TOO_LONG_MESSAGE });
+  }
+
+  let client;
+  try {
+    const target = await commentPostTarget(req, res);
+    if (!target) return;
+    if (isReadOnlyCommunity(target.community.slug)) {
+      return res.status(403).json({ error: COMMENT_READ_ONLY_MESSAGE, code: 'read_only' });
+    }
+    const memberRes = await db.query(
+      'SELECT * FROM community_members WHERE community_id = $1 AND user_id = $2',
+      [target.community.id, userId]
+    );
+    if (!memberRes.rows[0]) {
+      return res.status(403).json({ error: COMMENT_NOT_MEMBER_MESSAGE, code: 'not_member' });
+    }
+    const post = await checkPostAccess(userId, target.community);
+    if (post.unavailable) {
+      return res.status(503).json({ error: POST_AREAS_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    }
+    if (!post.ok) {
+      return res.status(403).json({
+        error: post.message,
+        code: post.code,
+        locked: true,
+        community_area: target.community.area || null
+      });
+    }
+
+    // Contar e gravar na mesma transação, com a linha da pessoa travada:
+    // dois pedidos ao mesmo tempo não passam da cota.
+    client = await db.connect();
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+    const countRes = await client.query(
+      `SELECT COUNT(*) AS total FROM community_comments
+       WHERE user_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
+      [userId]
+    );
+    if (parseInt(countRes.rows[0].total) >= COMMENTS_PER_DAY) {
+      await client.query('ROLLBACK');
+      return res.status(429).json({ error: COMMENT_RATE_LIMIT_MESSAGE, limit: COMMENTS_PER_DAY });
+    }
+
+    const result = await client.query(
+      `INSERT INTO community_comments (post_id, user_id, content)
+       VALUES ($1, $2, $3) RETURNING *`,
+      [target.post.id, userId, text]
+    );
+    await client.query('COMMIT');
+
+    const { user_id: _autor, ...criado } = result.rows[0];
+    res.status(201).json({
+      comment: {
+        ...criado,
+        is_mine: true,
+        supports: 0,
+        supported_by_me: false,
+        hidden: false
+      }
+    });
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
+    }
+    // Sem log: nada do pedido (nem o texto do comentário) vai para o console.
+    if (isMissingSchema(err)) return res.status(503).json({ error: COMMENT_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    res.status(500).json({ error: COMMENT_SERVER_ERROR_MESSAGE });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Denúncia de comentário. A crise no texto livre não impede a denúncia (o
+// comentário pode ser perigoso), mas o texto não é gravado nem logado.
+router.post('/:slug/posts/:postId/comments/:commentId/report', auth, async (req, res) => {
+  const userId = req.user.userId;
+  const { reason, details } = req.body || {};
+
+  const crisisLevel = typeof details === 'string' ? classifyNote(details) : null;
+  const refuse = (status, payload) => {
+    if (crisisLevel) {
+      return res.status(200).json({
+        reported: false,
+        crisis: true,
+        crisis_level: crisisLevel,
+        message: COMMENT_REPORT_CRISIS_NOT_SENT_MESSAGE
+      });
+    }
+    return res.status(status).json(payload);
+  };
+
+  const postId = parsePostId(req.params.postId);
+  const commentId = parsePostId(req.params.commentId);
+  if (!postId) return refuse(404, { error: COMMENT_POST_NOT_FOUND_MESSAGE });
+  if (!commentId) return refuse(404, { error: COMMENT_NOT_FOUND_MESSAGE });
+  if (!isValidReason(reason)) return refuse(400, { error: REPORT_REASON_MESSAGE });
+
+  let cleanDetails = null;
+  if (!crisisLevel && details != null) {
+    if (typeof details !== 'string') return refuse(400, { error: COMMENT_DETAILS_NOT_TEXT_MESSAGE });
+    const text = details.trim();
+    if (noteLength(text) > NOTE_MAX_CHARS) {
+      return refuse(400, { error: COMMENT_DETAILS_TOO_LONG_MESSAGE });
+    }
+    cleanDetails = text || null;
+  }
+
+  let client;
+  try {
+    // Segunda conferência 18+ antes de gravar, como na denúncia de post.
+    if (!(await hasAdultConfirmation(userId))) return refuse(403, adultRequiredBody());
+
+    const commRes = await db.query('SELECT id, slug FROM communities WHERE slug = $1', [req.params.slug]);
+    const community = commRes.rows[0];
+    if (!community) return refuse(404, { error: 'Comunidade não encontrada.' });
+
+    const memberRes = await db.query(
+      'SELECT * FROM community_members WHERE community_id = $1 AND user_id = $2',
+      [community.id, userId]
+    );
+    if (!memberRes.rows[0]) return refuse(403, { error: REPORT_NOT_MEMBER_MESSAGE });
+
+    client = await db.connect();
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+
+    const commentRes = await client.query(
+      `SELECT cc.id, cc.user_id, cc.hidden_at, cc.restored_at
+       FROM community_comments cc
+       JOIN community_posts cp ON cp.id = cc.post_id
+       WHERE cc.id = $1 AND cp.id = $2 AND cp.community_id = $3
+       FOR UPDATE`,
+      [commentId, postId, community.id]
+    );
+    const comment = commentRes.rows[0];
+    if (!comment) {
+      await client.query('ROLLBACK');
+      return refuse(404, { error: COMMENT_NOT_FOUND_MESSAGE });
+    }
+    if (Number(comment.user_id) === Number(userId)) {
+      await client.query('ROLLBACK');
+      return refuse(400, { error: COMMENT_OWN_REPORT_MESSAGE });
+    }
+
+    let fastTrack = false;
+    if (reason === URGENT_REASON) {
+      const quotaRes = await client.query(
+        `SELECT COUNT(*) AS total FROM community_comment_reports
+         WHERE reporter_id = $1 AND fast_track = true
+           AND created_at > NOW() - INTERVAL '24 hours'`,
+        [userId]
+      );
+      fastTrack = parseInt(quotaRes.rows[0].total) < FAST_TRACK_PER_DAY;
+    }
+
+    const insertRes = await client.query(
+      `INSERT INTO community_comment_reports (comment_id, reporter_id, reason, details, fast_track)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (comment_id, reporter_id) DO NOTHING
+       RETURNING id`,
+      [commentId, userId, reason, cleanDetails, fastTrack]
+    );
+    if (insertRes.rowCount !== 1) {
+      await client.query('ROLLBACK');
+      return refuse(409, { error: COMMENT_DUPLICATE_REPORT_MESSAGE, already_reported: true });
+    }
+
+    if (!comment.hidden_at) {
+      const since = comment.restored_at || null;
+      const countRes = await client.query(
+        `SELECT reason, fast_track, COUNT(*) AS total
+         FROM community_comment_reports
+         WHERE comment_id = $1
+           AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)
+         GROUP BY reason, fast_track`,
+        [commentId, since]
+      );
+      if (shouldHide(countRes.rows)) {
+        await client.query(
+          `UPDATE community_comments
+           SET hidden_at = NOW(), hidden_reason = $2
+           WHERE id = $1 AND hidden_at IS NULL`,
+          [commentId, pickHiddenReason(countRes.rows)]
+        );
+        await client.query(
+          `UPDATE community_comment_reports
+           SET hid_comment_at = NOW()
+           WHERE comment_id = $1
+             AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)`,
+          [commentId, since]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    if (crisisLevel) {
+      return res.status(201).json({
+        reported: true,
+        crisis: true,
+        crisis_level: crisisLevel,
+        message: COMMENT_REPORT_CRISIS_SAVED_MESSAGE
+      });
+    }
+    res.status(201).json({ reported: true, message: COMMENT_REPORT_DONE_MESSAGE });
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* nada a desfazer */ }
+    }
+    // Sem log: nada do pedido (nem o texto da denúncia) vai para o console.
+    if (isMissingSchema(err)) return refuse(503, { error: COMMENT_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    refuse(500, { error: COMMENT_SERVER_ERROR_MESSAGE });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Comentário que pode receber apoio: existe, é do post e da comunidade e
+// não está escondido. Não aponta quem apoiou.
+async function commentSupportTarget(req, res) {
+  const postId = parsePostId(req.params.postId);
+  const commentId = parsePostId(req.params.commentId);
+  if (!postId || !commentId) {
+    res.status(404).json({ error: COMMENT_NOT_FOUND_MESSAGE });
+    return null;
+  }
+  const commRes = await db.query('SELECT id, slug FROM communities WHERE slug = $1', [req.params.slug]);
+  const community = commRes.rows[0];
+  if (!community) {
+    res.status(404).json({ error: 'Comunidade não encontrada.' });
+    return null;
+  }
+  if (isReadOnlyCommunity(community.slug)) {
+    res.status(403).json({ error: READ_ONLY_MESSAGE, code: 'read_only' });
+    return null;
+  }
+  const result = await db.query(
+    `SELECT cc.id, cc.user_id, (to_jsonb(cc) ->> 'hidden_at') IS NOT NULL AS hidden
+     FROM community_comments cc
+     JOIN community_posts cp ON cp.id = cc.post_id
+     WHERE cc.id = $1 AND cp.id = $2 AND cp.community_id = $3`,
+    [commentId, postId, community.id]
+  );
+  const comment = result.rows[0];
+  if (!comment || comment.hidden) {
+    res.status(404).json({ error: COMMENT_NOT_FOUND_MESSAGE });
+    return null;
+  }
+  return comment;
+}
+
+async function commentSupportTotal(commentId) {
+  const result = await db.query(
+    'SELECT COUNT(*)::int AS total FROM community_comment_supports WHERE comment_id = $1',
+    [commentId]
+  );
+  return Number(result.rows[0]?.total) || 0;
+}
+
+router.post('/:slug/posts/:postId/comments/:commentId/support', auth, async (req, res) => {
+  const userId = req.user.userId;
+  try {
+    const comment = await commentSupportTarget(req, res);
+    if (!comment) return;
+    if (Number(comment.user_id) === Number(userId)) {
+      return res.status(403).json({ error: COMMENT_SUPPORT_OWN_MESSAGE, code: 'own_comment' });
+    }
+    const insertRes = await db.query(
+      `INSERT INTO community_comment_supports (comment_id, user_id)
+       VALUES ($1, $2)
+       ON CONFLICT (comment_id, user_id) DO NOTHING
+       RETURNING id`,
+      [comment.id, userId]
+    );
+    if (insertRes.rowCount !== 1) {
+      return res.status(409).json({ error: COMMENT_SUPPORT_DUPLICATE_MESSAGE, code: 'already_supported' });
+    }
+    res.status(201).json({ supported: true, supports: await commentSupportTotal(comment.id) });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: COMMENT_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    res.status(500).json({ error: COMMENT_SERVER_ERROR_MESSAGE });
+  }
+});
+
+router.delete('/:slug/posts/:postId/comments/:commentId/support', auth, async (req, res) => {
+  const userId = req.user.userId;
+  try {
+    const comment = await commentSupportTarget(req, res);
+    if (!comment) return;
+    const result = await db.query(
+      'DELETE FROM community_comment_supports WHERE comment_id = $1 AND user_id = $2',
+      [comment.id, userId]
+    );
+    res.json({
+      supported: false,
+      removed: Boolean(result.rowCount),
+      supports: await commentSupportTotal(comment.id)
+    });
+  } catch (err) {
+    if (isMissingSchema(err)) return res.status(503).json({ error: COMMENT_UNAVAILABLE_MESSAGE, code: 'unavailable' });
+    res.status(500).json({ error: COMMENT_SERVER_ERROR_MESSAGE });
   }
 });
 

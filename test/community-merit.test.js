@@ -136,11 +136,12 @@ describe('rotas de mérito e ranking', { concurrency: 1 }, () => {
   });
 
   test('ranking: os 3 primeiros + a minha posição, só apelido, título, missões e dias', async () => {
+    // Caso negado: a lista de membros tem user_id no banco, mas não na resposta.
     db.rankingRows = [
-      { position: 1, username: 'ana', missions: 7, days_in_community: 40, is_me: false },
-      { position: 2, username: 'beto', missions: 3, days_in_community: 9, is_me: false },
-      { position: 3, username: 'caio', missions: 3, days_in_community: 2, is_me: false },
-      { position: 4, username: 'eu', missions: 1, days_in_community: 0, is_me: true }
+      { position: 1, user_id: 11, username: 'ana', missions: 7, days_in_community: 40, is_me: false },
+      { position: 2, user_id: 12, username: 'beto', missions: 3, days_in_community: 9, is_me: false },
+      { position: 3, user_id: 13, username: 'caio', missions: 3, days_in_community: 2, is_me: false },
+      { position: 4, user_id: 5, username: 'eu', missions: 1, days_in_community: 0, is_me: true }
     ];
     const res = await call('/api/communities/foco/ranking');
     assert.equal(res.status, 200);
@@ -149,6 +150,7 @@ describe('rotas de mérito e ranking', { concurrency: 1 }, () => {
     for (const row of [...res.body.top, res.body.me]) {
       assert.deepEqual(Object.keys(row).sort(), ['days_in_community', 'is_me', 'missions', 'position', 'title', 'username']);
     }
+    assert.equal(JSON.stringify(res.body).includes('user_id'), false);
     assert.equal(res.body.rule, 'Vale o número de missões. No empate, o tempo na comunidade.');
   });
 

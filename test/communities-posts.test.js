@@ -305,14 +305,19 @@ describe('comunidades: rotas, entrada e posts', { concurrency: 1 }, () => {
     assert.equal(db.lastMemberInsert[2], '');
   });
 
-  test('posts: is_mine diz se o post é de quem pede (página e publicar)', async () => {
+  test('posts: is_mine diz se o post é de quem pede; o user_id nunca sai na resposta', async () => {
     db.posts.push({ id: 1, community_id: 3, user_id: 9, content: 'de outra pessoa' }, { id: 2, community_id: 3, user_id: 2, content: 'meu' });
     const page = await request('GET', '/api/communities/foco', { token: tokenFor(2) });
     assert.deepEqual(page.body.posts.map((p) => [p.id, p.is_mine]), [[1, false], [2, true]]);
+    // Caso negado: o post da outra pessoa tem user_id 9 no banco, mas a
+    // resposta não pode trazer esse número interno.
+    assert.equal(JSON.stringify(page.body).includes('user_id'), false);
+    for (const post of page.body.posts) assert.equal('user_id' in post, false);
     makeMember(2);
     const sent = await request('POST', '/api/communities/foco/posts', { token: tokenFor(2), body: { content: 'nova dica' } });
     assert.equal(sent.status, 201);
     assert.equal(sent.body.post.is_mine, true);
+    assert.equal('user_id' in sent.body.post, false);
   });
 
   test('entrar de novo não soma membro', async () => {

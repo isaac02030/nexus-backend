@@ -541,6 +541,9 @@ describe('comunidade: denúncia, post escondido e moderação', { concurrency: 1
     assert.equal(post.reports.length, 3);
     assert.equal(post.reports[0].details, 'link de loja');
     assert.equal(JSON.stringify(res.body).includes('reporter_id'), false);
+    // A lista do admin também não devolve o número interno do autor.
+    assert.equal(JSON.stringify(res.body).includes('user_id'), false);
+    assert.equal('user_id' in post, false);
     const listQuery = db.queries.find((q) => /WHERE cp\.hidden_at IS NOT NULL/.test(q.text));
     // reporter_id só é usado dentro do alerta (EXISTS), nunca vai para a resposta.
     const built = /json_build_object\(([^)]*)\)/.exec(listQuery.text)[1];

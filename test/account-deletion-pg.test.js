@@ -17,7 +17,8 @@ const PASSWORD = 'senha-de-teste-123';
 const A = 2; const B = 3; const C = 4; const D = 5; const E = 6;
 const TABLES = ['users', 'missions', 'mission_matches', 'checkins', 'messages', 'notification_log',
   'push_subscriptions', 'communities', 'community_members', 'community_posts', 'community_post_reports',
-  'community_missions', 'community_mission_participants', 'community_post_supports', 'community_marathon_checkins'];
+  'community_missions', 'community_mission_participants', 'community_post_supports', 'community_marathon_checkins',
+  'community_comments', 'community_comment_reports', 'community_comment_supports'];
 
 function psqlFile(file) {
   execFileSync('psql', [dbUrl, '--no-psqlrc', '-v', 'ON_ERROR_STOP=1', '-q',
@@ -39,7 +40,8 @@ test('excluir a conta no Postgres: Duo passa ao parceiro, solo sai inteiro', {
     '004_mission_weekdays.sql', '005_community_post_reports.sql', '006_user_adult_confirmation.sql',
     '007_user_note_consent.sql', '008_user_legal_acceptance.sql',
     '009_user_notification_choices.sql', '010_user_message_notice.sql', '011_chat_blocks_and_reports.sql', '012_mission_invites.sql',
-    '013_community_areas.sql', '015_community_post_supports.sql', '017_community_marathon.sql']) {
+    '013_community_areas.sql', '015_community_post_supports.sql', '017_community_marathon.sql',
+    '018_community_comments.sql']) {
     psqlFile(path.join(repoRoot, 'migrations', f));
   }
   psqlFile(path.join(repoRoot, 'scripts', 'sql', 'papel-do-app.sql'));

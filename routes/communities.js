@@ -216,10 +216,10 @@ async function checkPostAccess(userId, community) {
   }
 }
 
-// O post é de quem pede? (is_mine). O user_id continua na resposta só por
-// compatibilidade com o site atual: OBSOLETO, sai num PR futuro.
-function isMine(row, userId) {
-  return row != null && row.user_id != null && Number(row.user_id) === Number(userId);
+// O post é de quem pede? (is_mine). O user_id serve só dentro do servidor,
+// para saber o dono, filtrar escondidos e conferir apoios. Nunca sai na resposta.
+function isMine(authorId, userId) {
+  return authorId != null && Number(authorId) === Number(userId);
 }
 
 // ============================================
@@ -272,7 +272,7 @@ router.get('/admin/hidden-posts', auth, async (req, res) => {
     // repeat_reporter_alert: alguém que ajudou a esconder este post escondeu
     // 2 ou mais posts nas últimas 24 horas. Só o alerta, nunca quem é.
     res.json({
-      posts: result.rows.map(({ urgent, ...post }) => ({
+      posts: result.rows.map(({ urgent, user_id: _autor, ...post }) => ({
         ...post,
         priority: urgent ? 'alta' : 'normal',
         hidden_reason_label: reasonLabel(post.hidden_reason)
@@ -742,9 +742,10 @@ async function loadDayDone(userId) {
   }
 }
 
-// Título do autor (PR D): só o nome e o nível; o número cru não sai.
-function withAuthorTitle({ author_missions: authorMissions, ...row }, userId) {
-  return { ...row, author_title: titleFor(authorMissions), is_mine: isMine(row, userId) };
+// Título do autor (PR D): só o nome e o nível. O user_id fica no servidor;
+// a resposta leva is_mine no lugar dele.
+function withAuthorTitle({ author_missions: authorMissions, user_id, ...row }, userId) {
+  return { ...row, author_title: titleFor(authorMissions), is_mine: isMine(user_id, userId) };
 }
 
 function visiblePost(post, userId) {
@@ -1083,7 +1084,8 @@ router.post('/:slug/posts', auth, async (req, res) => {
     );
     await client.query('COMMIT');
 
-    res.status(201).json({ post: { ...result.rows[0], is_mine: true } });
+    const { user_id: _autor, ...postCriado } = result.rows[0];
+    res.status(201).json({ post: { ...postCriado, is_mine: true } });
 
   } catch (err) {
     if (client) {

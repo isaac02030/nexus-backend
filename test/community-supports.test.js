@@ -308,11 +308,14 @@ describe('apoios, destaques e lista', { concurrency: 1 }, () => {
     assert.equal(res.body.posts[0].cursor_time, undefined);
     assert.equal(res.body.posts[0].author_title, null);
     assert.equal(res.body.posts[0].author_missions, undefined);
-    // is_mine: quem pede (5) não é o autor (2). user_id fica por compatibilidade (obsoleto).
+    // is_mine: quem pede (5) não é o autor (2). O user_id do banco não sai.
     assert.equal(res.body.posts[0].is_mine, false);
+    assert.equal(JSON.stringify(res.body).includes('user_id'), false);
+    for (const post of res.body.posts) assert.equal('user_id' in post, false);
     db.feedRows = [row(40, '2026-11-27 09:00:00'), { ...row(41, '2026-11-27 08:59:00'), user_id: 5 }];
     const mine = await call('GET', '/api/communities/foco/posts');
     assert.deepEqual(mine.body.posts.map((p) => p.is_mine), [false, true]);
+    assert.equal(JSON.stringify(mine.body).includes('user_id'), false);
     const q = db.queries.find((item) => /ORDER BY cp\.created_at DESC, cp\.id DESC LIMIT \$5$/.test(item.text));
     assert.deepEqual(q.params, [3, 5, null, null, 11]);
     assert.doesNotMatch(q.text, /OFFSET/);
@@ -351,7 +354,8 @@ describe('apoios, destaques e lista', { concurrency: 1 }, () => {
   });
 
   test('destaques: até 3, só apoios dos últimos 7 dias, post escondido fica de fora', async () => {
-    db.highlights = [{ id: 10, week_supports: 4, supports: 6, supported_by_me: false, author_missions: 3 }];
+    // Caso negado: o destaque é de outra pessoa (user_id 9) no banco.
+    db.highlights = [{ id: 10, user_id: 9, week_supports: 4, supports: 6, supported_by_me: false, author_missions: 3 }];
     const res = await call('GET', '/api/communities/foco/highlights');
     assert.equal(res.status, 200);
     // Título do autor (PR D): nome e nível, sem o número cru.
@@ -360,6 +364,7 @@ describe('apoios, destaques e lista', { concurrency: 1 }, () => {
       days: 7,
       max: 3
     });
+    assert.equal(JSON.stringify(res.body).includes('user_id'), false);
     const q = db.queries.find((item) => /JOIN community_post_supports s ON/.test(item.text));
     assert.match(q.text, /AND \(to_jsonb\(cp\) ->> 'hidden_at'\) IS NULL GROUP BY/);
     assert.match(q.text, /s\.created_at > NOW\(\) - \(\$3::int \* INTERVAL '1 day'\)/);

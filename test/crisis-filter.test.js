@@ -780,14 +780,17 @@ describe('filtro de crise v2.2: desvios e casos travados', () => {
   test('desvio 4: «ter morrido de saudade» não é exceção', () => {
     assert.equal(classifyNote('queria ter morrido de saudade'), 'alto');
   });
-  test('v2.3 (a): treino/academia depois de «me matei»/«mato-me» continua ALTO (exceção desligada até o profissional)', () => {
-    assert.equal(classifyNote('me matei no treino'), 'alto');
+  test('v2.3 (a): «me matei no treino» cala (exceção aprovada pelo profissional, 28/11); presente continua ALTO', () => {
+    assert.equal(classifyNote('me matei no treino'), null);
     assert.equal(classifyNote('mato-me na academia'), 'alto');
+    assert.equal(classifyNote('vou me matar no treino'), 'alto');
   });
   test('v2.3 (b): «devia morrer» sozinho agora dispara ALTO (decisão de 23/11)', () => {
     assert.equal(classifyNote('devia morrer'), 'alto');
   });
-  test('v2.3 (c): «morreu de rir e eu junto» continua ALTO (exceção desligada até o profissional)', () => {
-    assert.equal(classifyNote('ele morreu de rir e eu junto'), 'alto');
+  test('v2.3 (c): «morreu de rir e eu junto» cala (exceção aprovada, 28/11); «morreu e eu junto» continua ALTO', () => {
+    assert.equal(classifyNote('ele morreu de rir e eu junto'), null);
+    assert.equal(classifyNote('ele morreu e eu junto'), 'alto');
+    assert.equal(classifyNote('ele morreu de cancer e eu junto'), 'alto');
   });
 });

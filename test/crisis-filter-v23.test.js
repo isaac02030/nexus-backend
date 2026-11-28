@@ -2,7 +2,6 @@ const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const Module = require('module');
 const { execFileSync } = require('child_process');
 const { classifyNote } = require('../lib/crisis-filter');
 
@@ -13,19 +12,6 @@ const LIB = path.join(__dirname, '..', 'lib', 'crisis-filter.js');
 const REFERENCE_V22 = path.join(__dirname, '..', 'referencia', 'crisis-filter-v2.2.js');
 const reference = require(REFERENCE_V22);
 
-// Carrega o filtro com as exceções do profissional LIGADAS, só neste teste,
-// para provar que o código escrito faz o que a proposta diz. Em produção a
-// constante fica false.
-function loadWithProfessionalExceptions() {
-  const flag = 'const PROFESSIONAL_EXCEPTIONS_ENABLED = false;';
-  const source = fs.readFileSync(LIB, 'utf8');
-  assert.equal(source.split(flag).length, 2, 'a constante tem de existir uma vez, desligada');
-  const loaded = new Module(LIB, module);
-  loaded.filename = LIB;
-  loaded.paths = Module._nodeModulePaths(path.dirname(LIB));
-  loaded._compile(source.replace(flag, 'const PROFESSIONAL_EXCEPTIONS_ENABLED = true;'), LIB);
-  return loaded.exports;
-}
 
 const all = (notes, level) => {
   for (const note of notes) assert.equal(classifyNote(note), level, note);
@@ -107,20 +93,25 @@ describe('filtro de crise v2.3 (4): guarda de «juntar»', () => {
   });
 });
 
-describe('filtro de crise v2.3 (3): exceções que esperam o profissional', () => {
-  const ON = loadWithProfessionalExceptions();
+// As 2 exceções da v2.3 foram aprovadas pelo profissional de saúde mental
+// (decisão de 28/11) e estão LIGADAS no filtro de verdade.
+describe('filtro de crise v2.3 (3): exceções aprovadas pelo profissional (ligadas)', () => {
+  const ON = { classifyNote };
   const TRAINING = ['me matei no treino', 'matei-me na academia hoje', 'me matei na corrida de domingo',
     'matei-me no ginasio'];
   const LAUGH = ['ele morreu de rir e eu junto', 'morreu de tanto rir e eu junto',
     'elas morreram de vergonha e eu junto', 'morreu de sono e eu junto'];
 
-  test('desligadas (padrão): o alerta continua', () => {
-    assert.match(fs.readFileSync(LIB, 'utf8'), /\nconst PROFESSIONAL_EXCEPTIONS_ENABLED = false;\n/);
-    all([...TRAINING, ...LAUGH], 'alto');
+  test('ligadas no filtro de verdade (a constante existe uma vez, true)', () => {
+    const source = fs.readFileSync(LIB, 'utf8');
+    assert.equal(source.split('\nconst PROFESSIONAL_EXCEPTIONS_ENABLED = true;\n').length, 2);
+    assert.doesNotMatch(source, /PROFESSIONAL_EXCEPTIONS_ENABLED = false/);
   });
 
-  test('ligadas (só neste teste): calam os casos da proposta', () => {
+  test('ligadas: calam só os casos da proposta', () => {
     for (const note of [...TRAINING, ...LAUGH]) assert.equal(ON.classifyNote(note), null, note);
+    // Na v2.2 (antes) esses casos eram ALTO: a mudança é só esta.
+    for (const note of [...TRAINING, ...LAUGH]) assert.equal(reference.classifyNote(note), 'alto', `v2.2: ${note}`);
   });
 
   test('ligadas: continuam ALTO presente, futuro, pontuação e outra frase de risco (casos negados)', () => {
@@ -161,9 +152,11 @@ const REGRESSION_HIGH = [
   'vou-me matar no treino', 'quero morrer a sério', 'tenho vontade de me matar na quadra',
   'Matar-me.', 'matar-me hoje', 'mato-me', 'eu me mato', 'matei-me ontem', 'matar-me-ei', 'hei de matar-me',
   'mais vale matar-me', 'ele matou-se', 'suicidar-me.', 'meu pai morreu e eu junto', 'morreu. E eu junto.',
-  'queria ter morrido', 'quero morrer', 'nao quero mais viver', 'me matei no treino', 'mato-me na academia',
-  'ele morreu de rir e eu junto'
+  'queria ter morrido', 'quero morrer', 'nao quero mais viver', 'mato-me na academia'
 ];
+// 'me matei no treino' e 'ele morreu de rir e eu junto' saíram daqui em 28/11:
+// são as 2 exceções aprovadas pelo profissional (testadas acima, com os casos
+// negados ao redor).
 
 describe('filtro de crise v2.3: regressão e equivalência', () => {
   test('a lista de regressão da v2.1/v2.2 continua ALTO (e era ALTO na v2.2)', () => {
@@ -181,6 +174,14 @@ describe('filtro de crise v2.3: regressão e equivalência', () => {
     'os documentos', 'meus documentos', 'seus documentos', 'as fotos', 'minhas fotos', 'suas fotos',
     'o dinheiro'
   ].map(object => new RegExp(`(^|[^a-z])eu junto ${object}([^a-z]|$)`));
+  // As 2 exceções aprovadas pelo profissional (28/11), escritas à mão: só
+  // passado em 1.ª pessoa colado em no/na + treino/academia/ginásio/corrida,
+  // e «morreu/morreram/morrer de rir/tanto rir/vergonha/sono» colado em
+  // «e eu junto». Qualquer outra descida o teste pega.
+  const APPROVED_PROFESSIONAL = [
+    /(^|[^a-z])(me matei|matei-me|matei me) n[oa] (treino|academia|ginasio|corrida)([^a-z]|$)/,
+    /(^|[^a-z])(morreu|morreram|morrer) de (rir|tanto rir|vergonha|sono) e eu junto([^a-z]|$)/
+  ];
 
   test('nunca desce de nível em relação à v2.2, fora da guarda de «juntar» aprovada', () => {
     const notes = buildNotes();
@@ -197,6 +198,7 @@ describe('filtro de crise v2.3: regressão e equivalência', () => {
       if (rank(now) >= rank(before)) continue;
       const plain = note.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
       if (APPROVED_JUNTO.some(approved => approved.test(plain))) { allowed++; continue; }
+      if (APPROVED_PROFESSIONAL.some(approved => approved.test(plain))) { allowed++; continue; }
       lower.push({ note, before, now });
     }
     assert.deepEqual(lower.slice(0, 10), [], `${lower.length} notas desceram fora da exceção aprovada`);
